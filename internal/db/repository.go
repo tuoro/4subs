@@ -45,6 +45,15 @@ func Open(path string) (*sql.DB, error) {
 }
 
 func applyMigrations(db *sql.DB) error {
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			name TEXT PRIMARY KEY,
+			applied_at TEXT NOT NULL
+		);
+	`); err != nil {
+		return err
+	}
+
 	entries, err := migrationFS.ReadDir("migrations")
 	if err != nil {
 		return err
@@ -57,12 +66,29 @@ func applyMigrations(db *sql.DB) error {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
 		}
+
+		var exists int
+		checkErr := db.QueryRow(`SELECT 1 FROM schema_migrations WHERE name = ? LIMIT 1;`, entry.Name()).Scan(&exists)
+		if checkErr == nil {
+			continue
+		}
+		if checkErr != nil && checkErr != sql.ErrNoRows {
+			return checkErr
+		}
+
 		sqlBytes, readErr := migrationFS.ReadFile("migrations/" + entry.Name())
 		if readErr != nil {
 			return readErr
 		}
 		if _, execErr := db.Exec(string(sqlBytes)); execErr != nil {
 			return fmt.Errorf("apply migration %s: %w", entry.Name(), execErr)
+		}
+		if _, insertErr := db.Exec(
+			`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?);`,
+			entry.Name(),
+			time.Now().UTC().Format(time.RFC3339),
+		); insertErr != nil {
+			return fmt.Errorf("record migration %s: %w", entry.Name(), insertErr)
 		}
 	}
 	return nil
@@ -229,6 +255,20 @@ func (r *Repository) SaveProviderCredentialJSON(ctx context.Context, name string
 		return err
 	}
 	return r.SaveProviderCredential(ctx, name, string(raw))
+}
+
+func (r *Repository) GetProviderCredentialBlob(ctx context.Context, name string) (string, error) {
+	var blob string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT secret_blob
+		FROM provider_credentials
+		WHERE name = ?
+		LIMIT 1;
+	`, name).Scan(&blob)
+	if err != nil {
+		return "", err
+	}
+	return blob, nil
 }
 
 func (r *Repository) CreateJob(ctx context.Context, jobType string, details string) (model.Job, error) {
@@ -459,6 +499,152 @@ func (r *Repository) ListMedia(ctx context.Context, missingOnly bool, limit int)
 	return items, nil
 }
 
+func (r *Repository) GetMediaByID(ctx context.Context, mediaID int64) (model.MediaItem, error) {
+	var item model.MediaItem
+	var year sql.NullInt64
+	var season sql.NullInt64
+	var episode sql.NullInt64
+	var hasSubtitle int
+	var createdAt string
+	var updatedAt string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, media_type, title, year, season, episode, file_path, media_hash, has_subtitle, created_at, updated_at
+		FROM media_items
+		WHERE id = ?
+		LIMIT 1;
+	`, mediaID).Scan(
+		&item.ID,
+		&item.MediaType,
+		&item.Title,
+		&year,
+		&season,
+		&episode,
+		&item.FilePath,
+		&item.MediaHash,
+		&hasSubtitle,
+		&createdAt,
+		&updatedAt,
+	)
+	if err != nil {
+		return model.MediaItem{}, err
+	}
+	item.Year = nullableIntFromDB(year)
+	item.Season = nullableIntFromDB(season)
+	item.Episode = nullableIntFromDB(episode)
+	item.HasSubtitle = hasSubtitle == 1
+	if parsed, parseErr := time.Parse(time.RFC3339, createdAt); parseErr == nil {
+		item.CreatedAt = &parsed
+	}
+	if parsed, parseErr := time.Parse(time.RFC3339, updatedAt); parseErr == nil {
+		item.UpdatedAt = &parsed
+	}
+	return item, nil
+}
+
+func (r *Repository) ReplaceSubtitleCandidates(ctx context.Context, mediaID int64, candidates []model.SubtitleCandidate) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.ExecContext(ctx, `DELETE FROM subtitle_candidates WHERE media_item_id = ?;`, mediaID); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, candidate := range candidates {
+		if _, err = tx.ExecContext(ctx, `
+			INSERT INTO subtitle_candidates (
+				media_item_id, provider_name, candidate_id, score, language, payload_json, expires_at, created_at,
+				title, release_name, language_text, download_url, details
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+		`,
+			mediaID,
+			candidate.ProviderName,
+			candidate.CandidateID,
+			candidate.Score,
+			candidate.Language,
+			candidate.RawPayload,
+			nullableTime(candidate.ExpiresAt),
+			now,
+			candidate.Title,
+			candidate.ReleaseName,
+			candidate.LanguageText,
+			candidate.DownloadURL,
+			candidate.Details,
+		); err != nil {
+			return err
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Repository) ListSubtitleCandidates(ctx context.Context, mediaID int64, limit int) ([]model.SubtitleCandidate, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, media_item_id, provider_name, candidate_id, score, language, payload_json, expires_at, created_at,
+		       title, release_name, language_text, download_url, details
+		FROM subtitle_candidates
+		WHERE media_item_id = ?
+		ORDER BY score DESC, created_at DESC
+		LIMIT ?;
+	`, mediaID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	candidates := make([]model.SubtitleCandidate, 0, limit)
+	for rows.Next() {
+		var candidate model.SubtitleCandidate
+		var expiresAt sql.NullString
+		var createdAt string
+		if err := rows.Scan(
+			&candidate.ID,
+			&candidate.MediaItemID,
+			&candidate.ProviderName,
+			&candidate.CandidateID,
+			&candidate.Score,
+			&candidate.Language,
+			&candidate.RawPayload,
+			&expiresAt,
+			&createdAt,
+			&candidate.Title,
+			&candidate.ReleaseName,
+			&candidate.LanguageText,
+			&candidate.DownloadURL,
+			&candidate.Details,
+		); err != nil {
+			return nil, err
+		}
+		if expiresAt.Valid && strings.TrimSpace(expiresAt.String) != "" {
+			if parsed, parseErr := time.Parse(time.RFC3339, expiresAt.String); parseErr == nil {
+				candidate.ExpiresAt = &parsed
+			}
+		}
+		if parsed, parseErr := time.Parse(time.RFC3339, createdAt); parseErr == nil {
+			candidate.CreatedAt = &parsed
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
 func nullableInt(value *int) any {
 	if value == nil {
 		return nil
@@ -472,4 +658,11 @@ func nullableIntFromDB(value sql.NullInt64) *int {
 	}
 	intVal := int(value.Int64)
 	return &intVal
+}
+
+func nullableTime(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return value.UTC().Format(time.RFC3339)
 }

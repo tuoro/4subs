@@ -58,27 +58,66 @@
             </template>
           </Column>
           <Column field="file_path" header="Path" />
+          <Column header="Actions">
+            <template #body="slotProps">
+              <Button
+                size="small"
+                label="Search"
+                icon="pi pi-cloud-download"
+                :loading="searchingMediaId === slotProps.data.id"
+                @click="searchCandidates(slotProps.data)"
+              />
+            </template>
+          </Column>
         </DataTable>
       </template>
     </Card>
+
+    <Dialog v-model:visible="candidateDialogVisible" modal :style="{ width: '70rem' }" :header="candidateDialogTitle">
+      <DataTable :value="currentCandidates" stripedRows>
+        <Column field="provider_name" header="Provider" />
+        <Column field="title" header="Title" />
+        <Column field="release_name" header="Release" />
+        <Column field="language_text" header="Language" />
+        <Column field="score" header="Score" />
+        <Column field="details" header="Details" />
+      </DataTable>
+      <div v-if="Object.keys(candidateErrors).length > 0" class="mt-16">
+        <h4>Provider Errors</h4>
+        <div v-for="(err, provider) in candidateErrors" :key="provider" class="muted">{{ provider }}: {{ err }}</div>
+      </div>
+    </Dialog>
+
+    <Toast />
   </section>
 </template>
 
 <script setup>
 import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { useToast } from 'primevue/usetoast'
 import Button from 'primevue/button'
 import Card from 'primevue/card'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import Tag from 'primevue/tag'
+import Dialog from 'primevue/dialog'
+import Toast from 'primevue/toast'
 
-import { getHealth, getJobs, getMedia, triggerScan } from '../api'
+import { getHealth, getJobs, getMedia, getMediaCandidates, searchMediaSubtitles, triggerScan } from '../api'
 
+const toast = useToast()
 const health = ref({})
 const jobs = ref([])
 const missingMedia = ref([])
 const missingCount = ref(0)
 const scanning = ref(false)
+const searchingMediaId = ref(null)
+
+const candidateDialogVisible = ref(false)
+const candidateDialogTitle = ref('Subtitle Candidates')
+const currentCandidates = ref([])
+const candidateErrors = ref({})
+
 let eventSource
 
 const tagSeverity = (status) => {
@@ -114,6 +153,23 @@ const runScan = async () => {
     await loadData()
   } finally {
     scanning.value = false
+  }
+}
+
+const searchCandidates = async (media) => {
+  searchingMediaId.value = media.id
+  candidateDialogTitle.value = `Candidates: ${media.title}`
+  candidateErrors.value = {}
+  try {
+    const result = await searchMediaSubtitles(media.id)
+    currentCandidates.value = await getMediaCandidates(media.id, 100)
+    candidateErrors.value = result.errors || {}
+    candidateDialogVisible.value = true
+    toast.add({ severity: 'success', summary: 'Search completed', detail: `Found ${result.count || 0} candidates`, life: 2500 })
+  } catch (error) {
+    toast.add({ severity: 'error', summary: 'Search failed', detail: error.message, life: 3000 })
+  } finally {
+    searchingMediaId.value = null
   }
 }
 

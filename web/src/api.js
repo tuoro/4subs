@@ -40,6 +40,16 @@ export function getMedia(options = {}) {
   return request(`/media${suffix}`)
 }
 
+export function searchMediaSubtitles(mediaId) {
+  return request(`/media/${mediaId}/search-subtitles`, {
+    method: 'POST'
+  })
+}
+
+export function getMediaCandidates(mediaId, limit = 100) {
+  return request(`/media/${mediaId}/candidates?limit=${limit}`)
+}
+
 export function getSettings() {
   return request('/settings')
 }

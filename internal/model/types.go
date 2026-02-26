@@ -42,3 +42,20 @@ type MediaItem struct {
 	CreatedAt   *time.Time `json:"created_at,omitempty"`
 	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
 }
+
+type SubtitleCandidate struct {
+	ID           int64      `json:"id"`
+	MediaItemID  int64      `json:"media_item_id"`
+	ProviderName string     `json:"provider_name"`
+	CandidateID  string     `json:"candidate_id"`
+	Title        string     `json:"title"`
+	ReleaseName  string     `json:"release_name,omitempty"`
+	Language     string     `json:"language,omitempty"`
+	LanguageText string     `json:"language_text,omitempty"`
+	Score        float64    `json:"score"`
+	DownloadURL  string     `json:"download_url,omitempty"`
+	Details      string     `json:"details,omitempty"`
+	RawPayload   string     `json:"raw_payload,omitempty"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	CreatedAt    *time.Time `json:"created_at,omitempty"`
+}

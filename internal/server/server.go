@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,13 +15,18 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gayhub/4subs/internal/config"
 	"github.com/gayhub/4subs/internal/db"
 	"github.com/gayhub/4subs/internal/model"
+	"github.com/gayhub/4subs/internal/provider"
+	"github.com/gayhub/4subs/internal/provider/assrt"
+	"github.com/gayhub/4subs/internal/provider/opensubtitles"
 	"github.com/gayhub/4subs/internal/scanner"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -57,6 +63,8 @@ func (s *Server) Routes() http.Handler {
 		api.Post("/scan", s.handleScan)
 		api.Get("/events", s.handleEvents)
 		api.Get("/media", s.handleMedia)
+		api.Post("/media/{id}/search-subtitles", s.handleSearchSubtitles)
+		api.Get("/media/{id}/candidates", s.handleMediaCandidates)
 	})
 
 	// Serve built PrimeVue app if present.
@@ -275,6 +283,145 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
+func (s *Server) handleSearchSubtitles(w http.ResponseWriter, r *http.Request) {
+	mediaID, err := strconv.ParseInt(strings.TrimSpace(chi.URLParam(r, "id")), 10, 64)
+	if err != nil || mediaID <= 0 {
+		writeError(w, http.StatusBadRequest, errors.New("invalid media id"))
+		return
+	}
+
+	mediaItem, err := s.repo.GetMediaByID(r.Context(), mediaID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, errors.New("media not found"))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	settings, err := s.repo.GetSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	input := provider.SearchInput{
+		MediaID:   mediaItem.ID,
+		Title:     mediaItem.Title,
+		MediaType: mediaItem.MediaType,
+		Year:      mediaItem.Year,
+		Season:    mediaItem.Season,
+		Episode:   mediaItem.Episode,
+		FilePath:  mediaItem.FilePath,
+		Limit:     20,
+	}
+
+	type providerResult struct {
+		Name       string
+		Candidates []model.SubtitleCandidate
+		Err        error
+	}
+	results := make([]providerResult, 0, 2)
+	resultCh := make(chan providerResult, 2)
+
+	clients := []provider.SearchProvider{
+		assrt.New(settings.LanguagePriority),
+		opensubtitles.New(settings.LanguagePriority),
+	}
+
+	var wg sync.WaitGroup
+	for _, client := range clients {
+		blob, err := s.repo.GetProviderCredentialBlob(r.Context(), client.Name())
+		if err != nil {
+			resultCh <- providerResult{Name: client.Name(), Err: err}
+			continue
+		}
+
+		credential, parseErr := parseCredentialBlob(blob, s.cfg.AppSecret, client.Name())
+		if parseErr != nil {
+			resultCh <- providerResult{Name: client.Name(), Err: parseErr}
+			continue
+		}
+		if len(credential) == 0 {
+			continue
+		}
+
+		wg.Add(1)
+		go func(searchClient provider.SearchProvider, cred map[string]string) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			defer cancel()
+
+			candidates, runErr := searchClient.Search(ctx, cred, input)
+			resultCh <- providerResult{
+				Name:       searchClient.Name(),
+				Candidates: candidates,
+				Err:        runErr,
+			}
+		}(client, credential)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	allCandidates := make([]model.SubtitleCandidate, 0, 64)
+	errorsByProvider := make(map[string]string)
+	for result := range resultCh {
+		results = append(results, result)
+		if result.Err != nil {
+			errorsByProvider[result.Name] = result.Err.Error()
+			continue
+		}
+		allCandidates = append(allCandidates, result.Candidates...)
+	}
+
+	sort.Slice(allCandidates, func(i, j int) bool {
+		return allCandidates[i].Score > allCandidates[j].Score
+	})
+
+	if err := s.repo.ReplaceSubtitleCandidates(r.Context(), mediaID, allCandidates); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	s.events.Publish("candidates.updated", map[string]any{
+		"media_id":    mediaID,
+		"count":       len(allCandidates),
+		"providerErr": errorsByProvider,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"media_id":    mediaID,
+		"count":       len(allCandidates),
+		"candidates":  allCandidates,
+		"errors":      errorsByProvider,
+		"providerRun": len(results),
+	})
+}
+
+func (s *Server) handleMediaCandidates(w http.ResponseWriter, r *http.Request) {
+	mediaID, err := strconv.ParseInt(strings.TrimSpace(chi.URLParam(r, "id")), 10, 64)
+	if err != nil || mediaID <= 0 {
+		writeError(w, http.StatusBadRequest, errors.New("invalid media id"))
+		return
+	}
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, parseErr := strconv.Atoi(raw); parseErr == nil && parsed > 0 && parsed <= 1000 {
+			limit = parsed
+		}
+	}
+
+	candidates, err := s.repo.ListSubtitleCandidates(r.Context(), mediaID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, candidates)
+}
+
 func (s *Server) staticHandler() http.Handler {
 	index := filepath.Join(s.cfg.StaticDir, "index.html")
 	if _, err := os.Stat(index); err == nil {
@@ -328,4 +475,85 @@ func encrypt(plaintext []byte, secret string) (string, error) {
 	}
 	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
 	return "enc:" + base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+func decrypt(ciphertext string, secret string) ([]byte, error) {
+	if strings.TrimSpace(secret) == "" {
+		return nil, errors.New("app secret is empty")
+	}
+	key := sha256.Sum256([]byte(secret))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := base64.StdEncoding.DecodeString(ciphertext)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) < gcm.NonceSize() {
+		return nil, errors.New("ciphertext too short")
+	}
+	nonce := raw[:gcm.NonceSize()]
+	payload := raw[gcm.NonceSize():]
+	plaintext, err := gcm.Open(nil, nonce, payload, nil)
+	if err != nil {
+		return nil, err
+	}
+	return plaintext, nil
+}
+
+func parseCredentialBlob(blob string, secret string, providerName string) (map[string]string, error) {
+	trimmed := strings.TrimSpace(blob)
+	if trimmed == "" {
+		return map[string]string{}, nil
+	}
+
+	parseJSON := func(raw []byte) (map[string]string, error) {
+		out := make(map[string]string)
+		if err := json.Unmarshal(raw, &out); err == nil && len(out) > 0 {
+			return out, nil
+		}
+		return nil, errors.New("credential json invalid")
+	}
+
+	if strings.HasPrefix(trimmed, "plain:") {
+		payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(trimmed, "plain:"))
+		if err != nil {
+			return nil, err
+		}
+		if parsed, err := parseJSON(payload); err == nil {
+			return parsed, nil
+		}
+		if providerName == "assrt" {
+			return map[string]string{"token": string(payload)}, nil
+		}
+		return nil, errors.New("invalid plain credential payload")
+	}
+
+	if strings.HasPrefix(trimmed, "enc:") {
+		payload, err := decrypt(strings.TrimPrefix(trimmed, "enc:"), secret)
+		if err != nil {
+			return nil, err
+		}
+		if parsed, err := parseJSON(payload); err == nil {
+			return parsed, nil
+		}
+		return nil, errors.New("invalid encrypted credential payload")
+	}
+
+	if strings.HasPrefix(trimmed, "{") {
+		if parsed, err := parseJSON([]byte(trimmed)); err == nil {
+			return parsed, nil
+		}
+	}
+
+	// Legacy assrt token format.
+	if providerName == "assrt" {
+		return map[string]string{"token": trimmed}, nil
+	}
+	return nil, errors.New("unsupported credential format")
 }
