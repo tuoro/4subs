@@ -81,6 +81,17 @@
         <Column field="language_text" header="Language" />
         <Column field="score" header="Score" />
         <Column field="details" header="Details" />
+        <Column header="Download">
+          <template #body="slotProps">
+            <Button
+              size="small"
+              icon="pi pi-download"
+              label="Download"
+              :loading="downloadingCandidateId === slotProps.data.id"
+              @click="downloadSelectedCandidate(slotProps.data)"
+            />
+          </template>
+        </Column>
       </DataTable>
       <div v-if="Object.keys(candidateErrors).length > 0" class="mt-16">
         <h4>Provider Errors</h4>
@@ -103,7 +114,7 @@ import Tag from 'primevue/tag'
 import Dialog from 'primevue/dialog'
 import Toast from 'primevue/toast'
 
-import { getHealth, getJobs, getMedia, getMediaCandidates, searchMediaSubtitles, triggerScan } from '../api'
+import { downloadCandidate, getHealth, getJobs, getMedia, getMediaCandidates, searchMediaSubtitles, triggerScan } from '../api'
 
 const toast = useToast()
 const health = ref({})
@@ -112,6 +123,7 @@ const missingMedia = ref([])
 const missingCount = ref(0)
 const scanning = ref(false)
 const searchingMediaId = ref(null)
+const downloadingCandidateId = ref(null)
 
 const candidateDialogVisible = ref(false)
 const candidateDialogTitle = ref('Subtitle Candidates')
@@ -170,6 +182,24 @@ const searchCandidates = async (media) => {
     toast.add({ severity: 'error', summary: 'Search failed', detail: error.message, life: 3000 })
   } finally {
     searchingMediaId.value = null
+  }
+}
+
+const downloadSelectedCandidate = async (candidate) => {
+  downloadingCandidateId.value = candidate.id
+  try {
+    const result = await downloadCandidate(candidate.id)
+    toast.add({
+      severity: 'success',
+      summary: 'Subtitle downloaded',
+      detail: result.file_path || 'Saved',
+      life: 3500
+    })
+    await loadData()
+  } catch (error) {
+    toast.add({ severity: 'error', summary: 'Download failed', detail: error.message, life: 3500 })
+  } finally {
+    downloadingCandidateId.value = null
   }
 }
 

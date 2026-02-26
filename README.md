@@ -72,6 +72,7 @@ Vite proxies `/api` to `http://localhost:8080`.
 - `GET /api/v1/media?missing_sub=true&limit=200`
 - `POST /api/v1/media/{id}/search-subtitles`
 - `GET /api/v1/media/{id}/candidates?limit=100`
+- `POST /api/v1/candidates/{id}/download`
 
 ## Notes
 
@@ -79,4 +80,4 @@ Vite proxies `/api` to `http://localhost:8080`.
 - If `APP_SECRET` is empty, credentials are stored in base64 plain mode (`plain:` prefix). Set `APP_SECRET` in production.
 - Scanner now walks `MEDIA_PATHS` recursively and upserts `media_items`.
 - Search adapters now query ASSRT and OpenSubtitles.com and store candidates in `subtitle_candidates`.
-- Download endpoint is the next step.
+- Download endpoint now fetches subtitle payload and writes files under `subtitle_output_path` (manual trigger only).

@@ -23,16 +23,27 @@ type SearchProvider interface {
 	Search(ctx context.Context, credential map[string]string, input SearchInput) ([]model.SubtitleCandidate, error)
 }
 
+type DownloadResult struct {
+	Data     []byte
+	FileName string
+	Note     string
+}
+
+type DownloadProvider interface {
+	Name() string
+	Download(ctx context.Context, credential map[string]string, candidate model.SubtitleCandidate) (DownloadResult, error)
+}
+
 func NormalizeLanguage(raw string) (code string, display string) {
 	r := toLowerTrim(raw)
 	switch {
-	case containsAny(r, "双语", "bilingual", "chs&eng", "zh-en", "简英", "中英"):
+	case containsAny(r, "\u53cc\u8bed", "bilingual", "chs&eng", "zh-en", "en-zh", "dual"):
 		return "bilingual", raw
-	case containsAny(r, "简", "zh-cn", "chs", "simplified"):
+	case containsAny(r, "\u7b80", "zh-cn", "chs", "simplified"):
 		return "zh-cn", raw
-	case containsAny(r, "繁", "zh-tw", "cht", "traditional"):
+	case containsAny(r, "\u7e41", "zh-tw", "cht", "traditional"):
 		return "zh-tw", raw
-	case containsAny(r, "english", "en"):
+	case containsAny(r, "english", "eng", "en"):
 		return "en", raw
 	default:
 		if r == "" {

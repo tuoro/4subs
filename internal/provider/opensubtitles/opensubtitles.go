@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -60,27 +61,21 @@ type searchItem struct {
 	} `json:"attributes"`
 }
 
+type downloadResponse struct {
+	Link      string `json:"link"`
+	FileName  string `json:"file_name"`
+	Remaining int    `json:"remaining"`
+	Requests  int    `json:"requests"`
+	Message   string `json:"message"`
+}
+
 func (c *Client) Search(ctx context.Context, credential map[string]string, input provider.SearchInput) ([]model.SubtitleCandidate, error) {
-	apiKey := strings.TrimSpace(credential["api_key"])
-	if apiKey == "" {
-		return nil, fmt.Errorf("opensubtitles api_key is empty")
-	}
-	userAgent := strings.TrimSpace(credential["user_agent"])
-	if userAgent == "" {
-		userAgent = "4subs v0.1.0"
+	apiKey, userAgent, err := credentials(credential)
+	if err != nil {
+		return nil, err
 	}
 
-	token := ""
-	username := strings.TrimSpace(credential["username"])
-	password := strings.TrimSpace(credential["password"])
-	if username != "" && password != "" {
-		var err error
-		token, err = c.login(ctx, apiKey, userAgent, username, password)
-		if err != nil {
-			// Continue without bearer token; search may still be allowed.
-			token = ""
-		}
-	}
+	token, _ := c.resolveToken(ctx, apiKey, userAgent, credential)
 
 	q := strings.TrimSpace(input.Title)
 	if input.MediaType == "episode" && input.Season != nil && input.Episode != nil {
@@ -183,6 +178,98 @@ func (c *Client) Search(ctx context.Context, credential map[string]string, input
 	return out, nil
 }
 
+func (c *Client) Download(ctx context.Context, credential map[string]string, candidate model.SubtitleCandidate) (provider.DownloadResult, error) {
+	apiKey, userAgent, err := credentials(credential)
+	if err != nil {
+		return provider.DownloadResult{}, err
+	}
+	token, err := c.resolveToken(ctx, apiKey, userAgent, credential)
+	if err != nil {
+		return provider.DownloadResult{}, err
+	}
+	if strings.TrimSpace(token) == "" {
+		return provider.DownloadResult{}, fmt.Errorf("opensubtitles requires authenticated user for download")
+	}
+
+	fileID, err := strconv.ParseInt(strings.TrimSpace(candidate.CandidateID), 10, 64)
+	if err != nil || fileID <= 0 {
+		return provider.DownloadResult{}, fmt.Errorf("invalid file id: %s", candidate.CandidateID)
+	}
+
+	bodyRaw, _ := json.Marshal(map[string]int64{"file_id": fileID})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiBase+"/download", bytes.NewReader(bodyRaw))
+	if err != nil {
+		return provider.DownloadResult{}, err
+	}
+	req.Header.Set("Api-Key", apiKey)
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return provider.DownloadResult{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return provider.DownloadResult{}, fmt.Errorf("opensubtitles download request failed: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var payload downloadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return provider.DownloadResult{}, err
+	}
+	if strings.TrimSpace(payload.Link) == "" {
+		if strings.TrimSpace(payload.Message) == "" {
+			return provider.DownloadResult{}, fmt.Errorf("opensubtitles download response missing link")
+		}
+		return provider.DownloadResult{}, fmt.Errorf("opensubtitles download error: %s", payload.Message)
+	}
+
+	fileData, err := c.fetchBytes(ctx, payload.Link)
+	if err != nil {
+		return provider.DownloadResult{}, err
+	}
+
+	fileName := strings.TrimSpace(payload.FileName)
+	if fileName == "" {
+		fileName = firstNonEmpty(candidate.ReleaseName, "opensubtitles_"+strconv.FormatInt(fileID, 10)+".srt")
+	}
+	fileName = filepath.Base(fileName)
+
+	return provider.DownloadResult{
+		Data:     fileData,
+		FileName: fileName,
+		Note:     fmt.Sprintf("requests=%d remaining=%d", payload.Requests, payload.Remaining),
+	}, nil
+}
+
+func credentials(credential map[string]string) (apiKey string, userAgent string, err error) {
+	apiKey = strings.TrimSpace(credential["api_key"])
+	if apiKey == "" {
+		return "", "", fmt.Errorf("opensubtitles api_key is empty")
+	}
+	userAgent = strings.TrimSpace(credential["user_agent"])
+	if userAgent == "" {
+		userAgent = "4subs v0.1.0"
+	}
+	return apiKey, userAgent, nil
+}
+
+func (c *Client) resolveToken(ctx context.Context, apiKey, userAgent string, credential map[string]string) (string, error) {
+	if token := strings.TrimSpace(credential["token"]); token != "" {
+		return token, nil
+	}
+	username := strings.TrimSpace(credential["username"])
+	password := strings.TrimSpace(credential["password"])
+	if username == "" || password == "" {
+		return "", nil
+	}
+	return c.login(ctx, apiKey, userAgent, username, password)
+}
+
 func (c *Client) login(ctx context.Context, apiKey, userAgent, username, password string) (string, error) {
 	bodyRaw, _ := json.Marshal(map[string]string{
 		"username": username,
@@ -203,7 +290,8 @@ func (c *Client) login(ctx context.Context, apiKey, userAgent, username, passwor
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("login status %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return "", fmt.Errorf("opensubtitles login failed: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var payload loginResponse
@@ -214,6 +302,23 @@ func (c *Client) login(ctx context.Context, apiKey, userAgent, username, passwor
 		return "", fmt.Errorf("empty login token")
 	}
 	return payload.Token, nil
+}
+
+func (c *Client) fetchBytes(ctx context.Context, target string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("opensubtitles file download failed: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return io.ReadAll(resp.Body)
 }
 
 func mustJSON(v any) string {

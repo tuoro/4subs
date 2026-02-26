@@ -645,6 +645,79 @@ func (r *Repository) ListSubtitleCandidates(ctx context.Context, mediaID int64, 
 	return candidates, nil
 }
 
+func (r *Repository) GetSubtitleCandidateByID(ctx context.Context, candidateID int64) (model.SubtitleCandidate, error) {
+	var candidate model.SubtitleCandidate
+	var expiresAt sql.NullString
+	var createdAt string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, media_item_id, provider_name, candidate_id, score, language, payload_json, expires_at, created_at,
+		       title, release_name, language_text, download_url, details
+		FROM subtitle_candidates
+		WHERE id = ?
+		LIMIT 1;
+	`, candidateID).Scan(
+		&candidate.ID,
+		&candidate.MediaItemID,
+		&candidate.ProviderName,
+		&candidate.CandidateID,
+		&candidate.Score,
+		&candidate.Language,
+		&candidate.RawPayload,
+		&expiresAt,
+		&createdAt,
+		&candidate.Title,
+		&candidate.ReleaseName,
+		&candidate.LanguageText,
+		&candidate.DownloadURL,
+		&candidate.Details,
+	)
+	if err != nil {
+		return model.SubtitleCandidate{}, err
+	}
+	if expiresAt.Valid && strings.TrimSpace(expiresAt.String) != "" {
+		if parsed, parseErr := time.Parse(time.RFC3339, expiresAt.String); parseErr == nil {
+			candidate.ExpiresAt = &parsed
+		}
+	}
+	if parsed, parseErr := time.Parse(time.RFC3339, createdAt); parseErr == nil {
+		candidate.CreatedAt = &parsed
+	}
+	return candidate, nil
+}
+
+func (r *Repository) SaveSubtitleFile(ctx context.Context, mediaID int64, language string, providerName string, releaseName string, filePath string, checksum string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err = tx.ExecContext(ctx, `
+		INSERT INTO subtitle_files (media_item_id, language, provider_name, release_name, file_path, checksum, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?);
+	`, mediaID, language, providerName, releaseName, filePath, checksum, now); err != nil {
+		return err
+	}
+
+	if _, err = tx.ExecContext(ctx, `
+		UPDATE media_items
+		SET has_subtitle = 1, updated_at = ?
+		WHERE id = ?;
+	`, now, mediaID); err != nil {
+		return err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func nullableInt(value *int) any {
 	if value == nil {
 		return nil

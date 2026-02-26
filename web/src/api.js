@@ -50,6 +50,12 @@ export function getMediaCandidates(mediaId, limit = 100) {
   return request(`/media/${mediaId}/candidates?limit=${limit}`)
 }
 
+export function downloadCandidate(candidateId) {
+  return request(`/candidates/${candidateId}/download`, {
+    method: 'POST'
+  })
+}
+
 export function getSettings() {
   return request('/settings')
 }

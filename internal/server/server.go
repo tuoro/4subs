@@ -1,6 +1,9 @@
 package server
 
 import (
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -8,6 +11,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,6 +69,7 @@ func (s *Server) Routes() http.Handler {
 		api.Get("/media", s.handleMedia)
 		api.Post("/media/{id}/search-subtitles", s.handleSearchSubtitles)
 		api.Get("/media/{id}/candidates", s.handleMediaCandidates)
+		api.Post("/candidates/{id}/download", s.handleDownloadCandidate)
 	})
 
 	// Serve built PrimeVue app if present.
@@ -422,6 +427,107 @@ func (s *Server) handleMediaCandidates(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, candidates)
 }
 
+func (s *Server) handleDownloadCandidate(w http.ResponseWriter, r *http.Request) {
+	candidateID, err := strconv.ParseInt(strings.TrimSpace(chi.URLParam(r, "id")), 10, 64)
+	if err != nil || candidateID <= 0 {
+		writeError(w, http.StatusBadRequest, errors.New("invalid candidate id"))
+		return
+	}
+
+	candidate, err := s.repo.GetSubtitleCandidateByID(r.Context(), candidateID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, errors.New("candidate not found"))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	mediaItem, err := s.repo.GetMediaByID(r.Context(), candidate.MediaItemID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, errors.New("media not found"))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	settings, err := s.repo.GetSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	blob, err := s.repo.GetProviderCredentialBlob(r.Context(), candidate.ProviderName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	credential, err := parseCredentialBlob(blob, s.cfg.AppSecret, candidate.ProviderName)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	var downloader provider.DownloadProvider
+	switch candidate.ProviderName {
+	case "assrt":
+		downloader = assrt.New(settings.LanguagePriority)
+	case "opensubtitles":
+		downloader = opensubtitles.New(settings.LanguagePriority)
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported provider: %s", candidate.ProviderName))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	result, err := downloader.Download(ctx, credential, candidate)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+
+	content, ext, err := normalizeSubtitlePayload(result.Data, result.FileName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	filePath, err := s.persistSubtitleFile(mediaItem, settings.SubtitleOutputPath, candidate.Language, ext, content)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	checksum := sha256.Sum256(content)
+	if err := s.repo.SaveSubtitleFile(
+		r.Context(),
+		mediaItem.ID,
+		candidate.Language,
+		candidate.ProviderName,
+		candidate.ReleaseName,
+		filePath,
+		hex.EncodeToString(checksum[:]),
+	); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	s.events.Publish("subtitle.downloaded", map[string]any{
+		"candidate_id": candidateID,
+		"media_id":     mediaItem.ID,
+		"path":         filePath,
+		"provider":     candidate.ProviderName,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"candidate_id": candidateID,
+		"media_id":     mediaItem.ID,
+		"file_path":    filePath,
+		"provider":     candidate.ProviderName,
+		"note":         result.Note,
+	})
+}
+
 func (s *Server) staticHandler() http.Handler {
 	index := filepath.Join(s.cfg.StaticDir, "index.html")
 	if _, err := os.Stat(index); err == nil {
@@ -556,4 +662,132 @@ func parseCredentialBlob(blob string, secret string, providerName string) (map[s
 		return map[string]string{"token": trimmed}, nil
 	}
 	return nil, errors.New("unsupported credential format")
+}
+
+func normalizeSubtitlePayload(raw []byte, sourceName string) ([]byte, string, error) {
+	if len(raw) == 0 {
+		return nil, "", errors.New("empty subtitle payload")
+	}
+
+	ext := strings.ToLower(filepath.Ext(sourceName))
+	if isZipBytes(raw) || ext == ".zip" {
+		content, detectedExt, err := extractFromZip(raw)
+		if err == nil {
+			return content, detectedExt, nil
+		}
+	}
+
+	if isGzipBytes(raw) || ext == ".gz" {
+		reader, err := gzip.NewReader(bytes.NewReader(raw))
+		if err == nil {
+			defer reader.Close()
+			content, readErr := io.ReadAll(reader)
+			if readErr == nil && len(content) > 0 {
+				baseExt := strings.ToLower(filepath.Ext(strings.TrimSuffix(sourceName, ext)))
+				if !isSubtitleExt(baseExt) {
+					baseExt = ".srt"
+				}
+				return content, baseExt, nil
+			}
+		}
+	}
+
+	if !isSubtitleExt(ext) {
+		ext = ".srt"
+	}
+	return raw, ext, nil
+}
+
+func extractFromZip(raw []byte) ([]byte, string, error) {
+	reader, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return nil, "", err
+	}
+	for _, file := range reader.File {
+		if file.FileInfo().IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(file.Name))
+		if !isSubtitleExt(ext) {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			continue
+		}
+		content, readErr := io.ReadAll(rc)
+		_ = rc.Close()
+		if readErr == nil && len(content) > 0 {
+			return content, ext, nil
+		}
+	}
+	return nil, "", errors.New("no subtitle file found in zip archive")
+}
+
+func isZipBytes(raw []byte) bool {
+	return len(raw) > 4 && raw[0] == 'P' && raw[1] == 'K'
+}
+
+func isGzipBytes(raw []byte) bool {
+	return len(raw) > 2 && raw[0] == 0x1f && raw[1] == 0x8b
+}
+
+func isSubtitleExt(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".srt", ".ass", ".ssa", ".vtt", ".sub":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) persistSubtitleFile(mediaItem model.MediaItem, outputRoot string, language string, ext string, data []byte) (string, error) {
+	lang := strings.ToLower(strings.TrimSpace(language))
+	if lang == "" {
+		lang = "unknown"
+	}
+	if !isSubtitleExt(ext) {
+		ext = ".srt"
+	}
+
+	relativeDir := s.relativeMediaDir(mediaItem.FilePath)
+	targetDir := filepath.Join(outputRoot, relativeDir)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return "", err
+	}
+
+	baseName := strings.TrimSuffix(filepath.Base(mediaItem.FilePath), filepath.Ext(mediaItem.FilePath))
+	fileName := fmt.Sprintf("%s.%s%s", baseName, lang, ext)
+	targetPath := filepath.Join(targetDir, fileName)
+	if _, err := os.Stat(targetPath); err == nil {
+		fileName = fmt.Sprintf("%s.%s.manual-%d%s", baseName, lang, time.Now().Unix(), ext)
+		targetPath = filepath.Join(targetDir, fileName)
+	}
+
+	if err := os.WriteFile(targetPath, data, 0o644); err != nil {
+		return "", err
+	}
+	return targetPath, nil
+}
+
+func (s *Server) relativeMediaDir(mediaPath string) string {
+	for _, root := range s.cfg.MediaPaths {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		rel, err := filepath.Rel(root, mediaPath)
+		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(rel, "..") {
+			continue
+		}
+		dir := filepath.Dir(rel)
+		if dir == "." {
+			return ""
+		}
+		return dir
+	}
+	return ""
 }
