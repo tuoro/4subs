@@ -21,6 +21,10 @@
             <div class="muted">Mode</div>
             <div>{{ health.runtime_mode || '-' }}</div>
           </div>
+          <div>
+            <div class="muted">Missing subtitles</div>
+            <div>{{ missingCount }}</div>
+          </div>
         </div>
       </template>
     </Card>
@@ -41,6 +45,22 @@
         </DataTable>
       </template>
     </Card>
+
+    <Card class="mt-16">
+      <template #title>Media Missing Subtitles</template>
+      <template #content>
+        <DataTable :value="missingMedia" stripedRows>
+          <Column field="title" header="Title" />
+          <Column field="media_type" header="Type" />
+          <Column header="Season/Episode">
+            <template #body="slotProps">
+              {{ seasonEpisode(slotProps.data) }}
+            </template>
+          </Column>
+          <Column field="file_path" header="Path" />
+        </DataTable>
+      </template>
+    </Card>
   </section>
 </template>
 
@@ -52,10 +72,12 @@ import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import Tag from 'primevue/tag'
 
-import { getHealth, getJobs, triggerScan } from '../api'
+import { getHealth, getJobs, getMedia, triggerScan } from '../api'
 
 const health = ref({})
 const jobs = ref([])
+const missingMedia = ref([])
+const missingCount = ref(0)
 const scanning = ref(false)
 let eventSource
 
@@ -66,16 +88,30 @@ const tagSeverity = (status) => {
   return 'secondary'
 }
 
+const seasonEpisode = (row) => {
+  if (row.media_type !== 'episode') return '-'
+  const season = row.season ?? '?'
+  const episode = row.episode ?? '?'
+  return `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
+}
+
 const loadData = async () => {
-  health.value = await getHealth()
-  jobs.value = await getJobs()
+  const [healthRes, jobsRes, mediaRes] = await Promise.all([
+    getHealth(),
+    getJobs(),
+    getMedia({ missingOnly: true, limit: 500 })
+  ])
+  health.value = healthRes
+  jobs.value = jobsRes
+  missingMedia.value = mediaRes
+  missingCount.value = mediaRes.length
 }
 
 const runScan = async () => {
   scanning.value = true
   try {
     await triggerScan()
-    jobs.value = await getJobs()
+    await loadData()
   } finally {
     scanning.value = false
   }
@@ -85,7 +121,7 @@ onMounted(async () => {
   await loadData()
   eventSource = new EventSource('/api/v1/events')
   eventSource.onmessage = async () => {
-    jobs.value = await getJobs()
+    await loadData()
   }
 })
 

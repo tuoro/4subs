@@ -28,3 +28,17 @@ type Job struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
+
+type MediaItem struct {
+	ID          int64      `json:"id"`
+	MediaType   string     `json:"media_type"`
+	Title       string     `json:"title"`
+	Year        *int       `json:"year,omitempty"`
+	Season      *int       `json:"season,omitempty"`
+	Episode     *int       `json:"episode,omitempty"`
+	FilePath    string     `json:"file_path"`
+	MediaHash   string     `json:"media_hash,omitempty"`
+	HasSubtitle bool       `json:"has_subtitle"`
+	CreatedAt   *time.Time `json:"created_at,omitempty"`
+	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+}

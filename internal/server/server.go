@@ -21,6 +21,7 @@ import (
 	"github.com/gayhub/4subs/internal/config"
 	"github.com/gayhub/4subs/internal/db"
 	"github.com/gayhub/4subs/internal/model"
+	"github.com/gayhub/4subs/internal/scanner"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -184,20 +185,45 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	}
 	s.events.Publish("job.created", job)
 
-	go s.runSimulatedScan(job.ID)
+	go s.runScanJob(job.ID)
 	writeJSON(w, http.StatusAccepted, job)
 }
 
-func (s *Server) runSimulatedScan(jobID string) {
+func (s *Server) runScanJob(jobID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_ = s.repo.UpdateJobStatus(ctx, jobID, "running", "")
+	_ = s.repo.UpdateJob(ctx, jobID, "running", "", "")
 	s.events.Publish("job.updated", map[string]string{"id": jobID, "status": "running"})
-	time.Sleep(2 * time.Second)
+	scanResult, err := scanner.Run(s.cfg.MediaPaths)
+	if err != nil {
+		_ = s.repo.UpdateJob(ctx, jobID, "failed", "", err.Error())
+		s.events.Publish("job.updated", map[string]string{"id": jobID, "status": "failed", "error": err.Error()})
+		return
+	}
 
-	_ = s.repo.UpdateJobStatus(ctx, jobID, "completed", "")
-	s.events.Publish("job.updated", map[string]string{"id": jobID, "status": "completed"})
+	inserted, updated, err := s.repo.UpsertMediaItems(ctx, scanResult.Items)
+	if err != nil {
+		_ = s.repo.UpdateJob(ctx, jobID, "failed", "", err.Error())
+		s.events.Publish("job.updated", map[string]string{"id": jobID, "status": "failed", "error": err.Error()})
+		return
+	}
+
+	details := fmt.Sprintf(
+		"Scanned %d video files, missing subtitles %d, inserted %d, updated %d",
+		scanResult.ScannedVideoFiles,
+		scanResult.MissingSubtitleFiles,
+		inserted,
+		updated,
+	)
+	_ = s.repo.UpdateJob(ctx, jobID, "completed", details, "")
+	s.events.Publish("job.updated", map[string]any{
+		"id":                  jobID,
+		"status":              "completed",
+		"scanned_video":       scanResult.ScannedVideoFiles,
+		"missing_subtitles":   scanResult.MissingSubtitleFiles,
+		"inserted_or_updated": inserted + updated,
+	})
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -232,9 +258,21 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleMedia(w http.ResponseWriter, _ *http.Request) {
-	// Placeholder for MVP. Real scanner/matcher integration will populate this.
-	writeJSON(w, http.StatusOK, []map[string]any{})
+func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
+	missingOnly := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("missing_sub")), "true")
+	limit := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 1000 {
+			limit = parsed
+		}
+	}
+
+	items, err := s.repo.ListMedia(r.Context(), missingOnly, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) staticHandler() http.Handler {

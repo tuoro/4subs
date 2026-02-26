@@ -28,6 +28,18 @@ export function triggerScan() {
   return request('/scan', { method: 'POST' })
 }
 
+export function getMedia(options = {}) {
+  const params = new URLSearchParams()
+  if (options.missingOnly) {
+    params.set('missing_sub', 'true')
+  }
+  if (options.limit) {
+    params.set('limit', String(options.limit))
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : ''
+  return request(`/media${suffix}`)
+}
+
 export function getSettings() {
   return request('/settings')
 }

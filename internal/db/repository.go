@@ -253,11 +253,15 @@ func (r *Repository) CreateJob(ctx context.Context, jobType string, details stri
 }
 
 func (r *Repository) UpdateJobStatus(ctx context.Context, jobID string, status string, errText string) error {
+	return r.UpdateJob(ctx, jobID, status, "", errText)
+}
+
+func (r *Repository) UpdateJob(ctx context.Context, jobID string, status string, details string, errText string) error {
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE jobs
-		SET status = ?, error = ?, updated_at = ?
+		SET status = ?, details = CASE WHEN ? = '' THEN details ELSE ? END, error = ?, updated_at = ?
 		WHERE id = ?;
-	`, status, errText, time.Now().UTC().Format(time.RFC3339), jobID)
+	`, status, details, details, errText, time.Now().UTC().Format(time.RFC3339), jobID)
 	return err
 }
 
@@ -301,4 +305,171 @@ func (r *Repository) ListJobs(ctx context.Context, limit int) ([]model.Job, erro
 		return nil, err
 	}
 	return jobs, nil
+}
+
+func (r *Repository) UpsertMediaItems(ctx context.Context, items []model.MediaItem) (inserted int64, updated int64, err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, item := range items {
+		existedBefore, checkErr := mediaExistsByPathTx(ctx, tx, item.FilePath)
+		if checkErr != nil {
+			err = checkErr
+			return 0, 0, err
+		}
+
+		hasSubtitle := 0
+		if item.HasSubtitle {
+			hasSubtitle = 1
+		}
+
+		res, execErr := tx.ExecContext(ctx, `
+			INSERT INTO media_items (
+				media_type, title, year, season, episode, file_path, media_hash, has_subtitle, created_at, updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(file_path) DO UPDATE SET
+				media_type = excluded.media_type,
+				title = excluded.title,
+				year = excluded.year,
+				season = excluded.season,
+				episode = excluded.episode,
+				media_hash = excluded.media_hash,
+				has_subtitle = excluded.has_subtitle,
+				updated_at = excluded.updated_at;
+		`,
+			item.MediaType,
+			item.Title,
+			nullableInt(item.Year),
+			nullableInt(item.Season),
+			nullableInt(item.Episode),
+			item.FilePath,
+			item.MediaHash,
+			hasSubtitle,
+			now,
+			now,
+		)
+		if execErr != nil {
+			err = execErr
+			return 0, 0, err
+		}
+		rows, rowsErr := res.RowsAffected()
+		if rowsErr != nil {
+			continue
+		}
+		if existedBefore {
+			updated += rows
+		} else {
+			inserted += rows
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return inserted, updated, nil
+}
+
+func mediaExistsByPathTx(ctx context.Context, tx *sql.Tx, filePath string) (bool, error) {
+	var exists int
+	err := tx.QueryRowContext(ctx, `
+		SELECT 1
+		FROM media_items
+		WHERE file_path = ?
+		LIMIT 1;
+	`, filePath).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *Repository) ListMedia(ctx context.Context, missingOnly bool, limit int) ([]model.MediaItem, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+
+	query := `
+		SELECT id, media_type, title, year, season, episode, file_path, media_hash, has_subtitle, created_at, updated_at
+		FROM media_items
+	`
+	args := make([]any, 0, 2)
+	if missingOnly {
+		query += " WHERE has_subtitle = 0 "
+	}
+	query += " ORDER BY updated_at DESC LIMIT ?;"
+	args = append(args, limit)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]model.MediaItem, 0, limit)
+	for rows.Next() {
+		var item model.MediaItem
+		var year sql.NullInt64
+		var season sql.NullInt64
+		var episode sql.NullInt64
+		var hasSubtitle int
+		var createdAt string
+		var updatedAt string
+		if err := rows.Scan(
+			&item.ID,
+			&item.MediaType,
+			&item.Title,
+			&year,
+			&season,
+			&episode,
+			&item.FilePath,
+			&item.MediaHash,
+			&hasSubtitle,
+			&createdAt,
+			&updatedAt,
+		); err != nil {
+			return nil, err
+		}
+		item.Year = nullableIntFromDB(year)
+		item.Season = nullableIntFromDB(season)
+		item.Episode = nullableIntFromDB(episode)
+		item.HasSubtitle = hasSubtitle == 1
+		if parsed, err := time.Parse(time.RFC3339, createdAt); err == nil {
+			item.CreatedAt = &parsed
+		}
+		if parsed, err := time.Parse(time.RFC3339, updatedAt); err == nil {
+			item.UpdatedAt = &parsed
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func nullableInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableIntFromDB(value sql.NullInt64) *int {
+	if !value.Valid {
+		return nil
+	}
+	intVal := int(value.Int64)
+	return &intVal
 }

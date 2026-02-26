@@ -10,6 +10,7 @@ Go + PrimeVue subtitle manager scaffold inspired by ChineseSubFinder.
 - Language priority settings (default `bilingual > zh-cn > zh-tw`)
 - No auto replace by default (manual intervention only)
 - Job endpoint + SSE event stream
+- Real media scan from mounted paths + missing subtitle detection
 - Docker-first deployment (`Dockerfile` + `docker-compose.yml`)
 
 ## Quick Start (Docker)
@@ -68,9 +69,10 @@ Vite proxies `/api` to `http://localhost:8080`.
 - `GET /api/v1/jobs`
 - `POST /api/v1/scan`
 - `GET /api/v1/events` (SSE)
+- `GET /api/v1/media?missing_sub=true&limit=200`
 
 ## Notes
 
 - OpenSubtitles integration target is `.com` only.
 - If `APP_SECRET` is empty, credentials are stored in base64 plain mode (`plain:` prefix). Set `APP_SECRET` in production.
-- Scanner/matcher/provider download flows are still scaffold-level and will be implemented in subsequent iterations.
+- Scanner now walks `MEDIA_PATHS` recursively and upserts `media_items`; subtitle search/download adapters are next.
