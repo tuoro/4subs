@@ -1,0 +1,30 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: 4subs:local
+    container_name: 4subs
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - HTTP_ADDR=:8080
+      - DATA_DIR=/app/data
+      - CONFIG_DIR=/app/config
+      - STATIC_DIR=/app/web/dist
+      - SUBTITLE_OUTPUT_PATH=/app/subtitles
+      - MEDIA_PATHS=/media
+    volumes:
+      - ./deploy/config:/app/config
+      - ./deploy/data:/app/data
+      - ./deploy/subtitles:/app/subtitles
+      - ${MEDIA_HOST_PATH:-./media}:/media:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

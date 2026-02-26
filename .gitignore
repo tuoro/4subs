@@ -1,0 +1,26 @@
+# Go
+/bin/
+*.exe
+*.test
+*.out
+
+# Local runtime data
+/deploy/data/*
+!/deploy/data/.gitkeep
+/deploy/config/*
+!/deploy/config/.gitkeep
+/deploy/subtitles/*
+!/deploy/subtitles/.gitkeep
+/media/*
+!/media/.gitkeep
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# Env
+.env
+
+# OS/editor
+.DS_Store
+Thumbs.db
