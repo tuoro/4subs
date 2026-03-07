@@ -3,7 +3,7 @@
     <div class="span-12">
       <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
       <Message v-else severity="info" :closable="false">
-        当前版本已支持“外挂/内嵌文本字幕提取 + DeepSeek 翻译 + 双语 SRT 导出”。如果视频没有字幕轨或外挂字幕，下一阶段再接入 ASR。
+        当前版本已支持“源字幕直译 + 找不到字幕时自动走远程 ASR 转写 + 双语 SRT 导出”。
       </Message>
     </div>
 
@@ -18,8 +18,8 @@
           <div class="value">{{ overview?.pending_job_count ?? 0 }}</div>
         </div>
         <div class="stat-card">
-          <div class="label">DeepSeek 状态</div>
-          <div class="value">{{ overview?.translation_ready ? '已配置' : '待配置' }}</div>
+          <div class="label">翻译 / ASR</div>
+          <div class="value">{{ statusSummary }}</div>
         </div>
       </div>
     </div>
@@ -35,7 +35,7 @@
         </div>
       </template>
       <template #content>
-        <p class="card-subtle">扫描挂载目录后，可直接对有外挂或内嵌文本字幕的视频创建翻译任务。</p>
+        <p class="card-subtle">现在即使视频没有源字幕，也会自动尝试音频转写；前提是你已经配置可用的 ASR API。</p>
         <DataTable :value="mediaItems" stripedRows paginator :rows="6">
           <Column field="title" header="标题" />
           <Column field="relative_path" header="相对路径" />
@@ -53,7 +53,7 @@
             </template>
           </Column>
         </DataTable>
-        <div class="table-note">如果媒体表为空，请先到设置页确认媒体目录，再回来执行扫描。</div>
+        <div class="table-note">如果没有配置 ASR，那么没有外挂字幕或内嵌字幕轨的视频仍然会失败。</div>
       </template>
     </Card>
 
@@ -94,9 +94,7 @@
           </Column>
           <Column field="current_stage" header="当前阶段" />
           <Column field="progress" header="进度">
-            <template #body="slotProps">
-              <div>{{ slotProps.data.progress }}%</div>
-            </template>
+            <template #body="slotProps">{{ slotProps.data.progress }}%</template>
           </Column>
           <Column field="details" header="说明" />
           <Column field="error_message" header="错误" />
@@ -116,7 +114,7 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import Button from 'primevue/button'
 import Card from 'primevue/card'
@@ -132,6 +130,15 @@ const jobs = ref([])
 const errorMessage = ref('')
 const scanning = ref(false)
 let timer = null
+
+const statusSummary = computed(() => {
+  if (!overview.value) {
+    return '加载中'
+  }
+  const translation = overview.value.translation_ready ? '翻译已就绪' : '翻译待配置'
+  const asr = overview.value.asr_ready ? 'ASR 已就绪' : 'ASR 待配置'
+  return `${translation} / ${asr}`
+})
 
 async function loadAll() {
   try {

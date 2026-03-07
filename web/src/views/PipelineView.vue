@@ -8,7 +8,7 @@
         </div>
       </template>
       <template #content>
-        <p class="card-subtle">当前已跑通的链路是：扫描媒体 -> 提取外挂/内嵌文本字幕 -> DeepSeek 翻译 -> 双语 SRT 输出。</p>
+        <p class="card-subtle">当前已跑通的链路是：扫描媒体 -> 先找字幕 -> 找不到则提音频做 ASR -> DeepSeek 翻译 -> 双语 SRT 输出。</p>
         <div class="pipeline-list">
           <div v-for="step in steps" :key="step.key" class="pipeline-item">
             <div class="card-title-row">
@@ -41,6 +41,10 @@
             <h3>翻译提供方</h3>
             <p>{{ runtime.translation_provider || '未设置' }}</p>
           </div>
+          <div class="tip-item">
+            <h3>ASR</h3>
+            <p>{{ runtime.asr_provider || '未设置' }} / {{ runtime.asr_model || '未设置' }}</p>
+          </div>
         </div>
       </template>
     </Card>
@@ -51,15 +55,15 @@
         <div class="tip-list">
           <div class="tip-item">
             <h3>已支持</h3>
-            <p>同名外挂字幕，或视频容器内嵌的文本字幕轨提取与翻译。</p>
+            <p>同名外挂字幕、内嵌文本字幕轨、以及找不到字幕时的远程 ASR 转写。</p>
           </div>
           <div class="tip-item">
             <h3>暂未支持</h3>
-            <p>纯音频 ASR 识别、图片字幕 OCR、ASS 样式导出和人工逐条校对。</p>
+            <p>图片字幕 OCR、ASS 样式导出、人工逐条校对和任务取消。</p>
           </div>
           <div class="tip-item">
             <h3>下一步</h3>
-            <p>后续最值得补的是 ASR 适配层，这样无源字幕的视频也能直接生成双语字幕。</p>
+            <p>后续最值得补的是预览校对和批量任务并发控制，这样生产可用性会明显提高。</p>
           </div>
         </div>
       </template>

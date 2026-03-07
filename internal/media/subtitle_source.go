@@ -25,6 +25,20 @@ func ExtractSubtitleSource(ctx context.Context, ffmpegBin string, videoPath stri
 	return extractEmbeddedSubtitle(ctx, ffmpegBin, videoPath, filepath.Join(workDir, safeName(baseName)+".embedded.srt"))
 }
 
+func ExtractAudio(ctx context.Context, ffmpegBin string, videoPath string, workDir string) (string, error) {
+	baseName := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath))
+	outputPath := filepath.Join(workDir, safeName(baseName)+".wav")
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return "", err
+	}
+	command := exec.CommandContext(ctx, ffmpegBin, "-y", "-i", videoPath, "-vn", "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", outputPath)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("音频提取失败: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return outputPath, nil
+}
+
 func ensureSRT(ctx context.Context, ffmpegBin string, inputPath string, outputPath string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return "", err
@@ -54,10 +68,20 @@ func extractEmbeddedSubtitle(ctx context.Context, ffmpegBin string, videoPath st
 	command := exec.CommandContext(ctx, ffmpegBin, "-y", "-i", videoPath, "-map", "0:s:0", outputPath)
 	output, err := command.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("未找到可提取的外挂或内嵌文本字幕；当前版本尚未接入 ASR。ffmpeg 输出: %s", strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("未找到可提取的外挂或内嵌文本字幕；将尝试 ASR。ffmpeg 输出: %s", strings.TrimSpace(string(output)))
 	}
 	if _, err := os.Stat(outputPath); err != nil {
 		return "", errors.New("字幕提取命令执行成功，但未生成字幕文件")
+	}
+	return outputPath, nil
+}
+
+func WriteTextFile(outputPath string, content string) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(outputPath, []byte(content), 0o644); err != nil {
+		return "", err
 	}
 	return outputPath, nil
 }
@@ -75,6 +99,11 @@ func WriteBilingualSRT(mediaPath string, mediaRoots []string, outputRoot string,
 		return "", err
 	}
 	return targetPath, nil
+}
+
+func WriteSourceSRT(mediaPath string, workDir string, content string) (string, error) {
+	baseName := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
+	return WriteTextFile(filepath.Join(workDir, safeName(baseName)+".asr.srt"), content)
 }
 
 func relativeMediaDir(mediaPath string, mediaRoots []string) string {

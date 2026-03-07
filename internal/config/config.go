@@ -21,6 +21,10 @@ type Config struct {
 	DeepSeekBaseURL     string
 	DeepSeekAPIKey      string
 	DeepSeekModel       string
+	ASRProvider         string
+	ASRBaseURL          string
+	ASRAPIKey           string
+	ASRModel            string
 	AppSecret           string
 }
 
@@ -38,6 +42,10 @@ func Load() (Config, error) {
 		DeepSeekBaseURL:     envOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 		DeepSeekAPIKey:      strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
 		DeepSeekModel:       envOrDefault("DEEPSEEK_MODEL", "deepseek-chat"),
+		ASRProvider:         envOrDefault("ASR_PROVIDER", "openai-compatible"),
+		ASRBaseURL:          envOrDefault("ASR_BASE_URL", "https://api.openai.com/v1"),
+		ASRAPIKey:           strings.TrimSpace(os.Getenv("ASR_API_KEY")),
+		ASRModel:            envOrDefault("ASR_MODEL", "whisper-1"),
 		AppSecret:           strings.TrimSpace(os.Getenv("APP_SECRET")),
 	}
 

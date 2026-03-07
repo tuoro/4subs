@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	openaiasr "github.com/gayhub/4subs/internal/asr/openai"
 	"github.com/gayhub/4subs/internal/config"
 	"github.com/gayhub/4subs/internal/db"
 	"github.com/gayhub/4subs/internal/jobrunner"
@@ -27,6 +28,7 @@ type Server struct {
 	cfg        config.Config
 	repo       *db.Repository
 	translator deepseek.Client
+	asr        openaiasr.Client
 	runner     *jobrunner.Runner
 }
 
@@ -46,14 +48,14 @@ func New(cfg config.Config, repo *db.Repository) *Server {
 		APIKey:  cfg.DeepSeekAPIKey,
 		Model:   cfg.DeepSeekModel,
 	}
-	runner := jobrunner.New(cfg, repo, translatorClient)
-	runner.ResumePending(context.Background())
-	return &Server{
-		cfg:        cfg,
-		repo:       repo,
-		translator: translatorClient,
-		runner:     runner,
+	asrClient := openaiasr.Client{
+		BaseURL: cfg.ASRBaseURL,
+		APIKey:  cfg.ASRAPIKey,
+		Model:   cfg.ASRModel,
 	}
+	runner := jobrunner.New(cfg, repo, translatorClient, asrClient)
+	runner.ResumePending(context.Background())
+	return &Server{cfg: cfg, repo: repo, translator: translatorClient, asr: asrClient, runner: runner}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -108,6 +110,7 @@ func (s *Server) handleHealth(writer http.ResponseWriter, request *http.Request)
 		"status":               "ok",
 		"timestamp":            time.Now().UTC(),
 		"translation_ready":    s.translator.Ready(),
+		"asr_ready":            s.asr.Ready(),
 		"subtitle_output_path": s.cfg.SubtitleOutputPath,
 	})
 }
@@ -136,8 +139,9 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 	}
 	response := model.Overview{
 		AppName:          "4subs",
-		AppSummary:       "当前版本已支持从外挂/内嵌文本字幕提取源字幕，通过 DeepSeek 翻译生成双语 SRT。",
+		AppSummary:       "当前版本已支持源字幕直译，并在找不到字幕时自动回退到远程 ASR 转写。",
 		TranslationReady: s.translator.Ready(),
+		AsrReady:         s.asr.Ready(),
 		MediaAssetCount:  mediaCount,
 		PendingJobCount:  pendingCount,
 		RecentJobs:       recentJobs,
@@ -156,6 +160,9 @@ func (s *Server) handlePipeline(writer http.ResponseWriter, request *http.Reques
 			"subtitle_output_dir":  s.cfg.SubtitleOutputPath,
 			"translation_provider": s.cfg.TranslationProvider,
 			"translation_ready":    s.translator.Ready(),
+			"asr_provider":         s.cfg.ASRProvider,
+			"asr_model":            s.cfg.ASRModel,
+			"asr_ready":            s.asr.Ready(),
 		},
 	})
 }
@@ -269,7 +276,7 @@ func (s *Server) handleCreateJob(writer http.ResponseWriter, request *http.Reque
 		TargetLanguage: firstNonEmpty(payload.TargetLanguage, settings.TargetLanguage),
 		Provider:       settings.TranslationProvider,
 		OutputFormats:  normalizeFormats(payload.OutputFormats, settings.OutputFormats),
-		Details:        firstNonEmpty(payload.Details, "任务已创建，等待后台提取字幕并翻译。"),
+		Details:        firstNonEmpty(payload.Details, "任务已创建，后台会先找字幕，找不到再自动走 ASR。"),
 	})
 	if err != nil {
 		s.writeError(writer, http.StatusBadRequest, err)
@@ -290,7 +297,7 @@ func (s *Server) handleRetryJob(writer http.ResponseWriter, request *http.Reques
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	if err := s.repo.UpdateJobProgress(request.Context(), job.ID, "queued", "queued", 0, "任务已重新排队", job.SourceSubtitlePath, job.OutputSubtitlePath, ""); err != nil {
+	if err := s.repo.UpdateJobProgress(request.Context(), job.ID, "queued", "queued", 0, "任务已重新排队", "", "", ""); err != nil {
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}

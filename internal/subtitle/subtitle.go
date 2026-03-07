@@ -73,6 +73,24 @@ func ParseSRT(content string) ([]Block, error) {
 	return blocks, nil
 }
 
+func RenderSRT(blocks []Block) string {
+	var builder strings.Builder
+	for index, block := range blocks {
+		builder.WriteString(strconv.Itoa(index + 1))
+		builder.WriteString("\n")
+		builder.WriteString(formatTimestamp(block.Start))
+		builder.WriteString(" --> ")
+		builder.WriteString(formatTimestamp(block.End))
+		builder.WriteString("\n")
+		for _, line := range block.Lines {
+			builder.WriteString(strings.TrimSpace(line))
+			builder.WriteString("\n")
+		}
+		builder.WriteString("\n")
+	}
+	return builder.String()
+}
+
 func RenderBilingualSRT(blocks []Block, translations []string, layout string) (string, error) {
 	if len(blocks) != len(translations) {
 		return "", errors.New("字幕块与翻译数量不一致")

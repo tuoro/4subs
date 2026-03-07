@@ -22,6 +22,9 @@
       - TRANSLATION_PROVIDER=${TRANSLATION_PROVIDER:-deepseek}
       - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
+      - ASR_PROVIDER=${ASR_PROVIDER:-openai-compatible}
+      - ASR_BASE_URL=${ASR_BASE_URL:-https://api.openai.com/v1}
+      - ASR_MODEL=${ASR_MODEL:-whisper-1}
     volumes:
       - ./deploy/config:/app/config
       - ./deploy/data:/app/data
@@ -34,4 +37,3 @@
       timeout: 5s
       retries: 3
       start_period: 20s
-

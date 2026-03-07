@@ -17,10 +17,16 @@ func DefaultSteps() []model.PipelineStep {
 			Owner:       "ffmpeg",
 		},
 		{
-			Key:         "parse_subtitle",
-			Title:       "字幕解析",
-			Description: "将提取到的 SRT 解析为可翻译的字幕块，保留编号与时间轴。",
-			Owner:       "字幕处理模块",
+			Key:         "extract_audio",
+			Title:       "音频提取",
+			Description: "如果没有可用源字幕，则先从视频中提取单声道语音音频。",
+			Owner:       "ffmpeg",
+		},
+		{
+			Key:         "transcribe",
+			Title:       "ASR 转写",
+			Description: "调用 OpenAI 兼容音频转写接口，返回带 segment 时间戳的字幕块。",
+			Owner:       "ASR 适配层",
 		},
 		{
 			Key:         "translate",
