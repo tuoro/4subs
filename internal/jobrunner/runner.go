@@ -86,46 +86,50 @@ func (r *Runner) process(jobID string) error {
 		return err
 	}
 
-	sourceSubtitlePath := job.SourceSubtitlePath
-	if err := r.repo.UpdateJobProgress(ctx, jobID, "running", "extract_subtitle", 10, "正在尝试获取源字幕", sourceSubtitlePath, job.OutputSubtitlePath, ""); err != nil {
+	paths := db.JobOutputPaths{
+		SourcePath:  job.SourceSubtitlePath,
+		PrimaryPath: job.OutputSubtitlePath,
+		SRTPath:     job.OutputSRTPath,
+		ASSPath:     job.OutputASSPath,
+	}
+	if err := r.repo.UpdateJobProgress(ctx, jobID, "running", "extract_subtitle", 10, "正在尝试获取源字幕", paths, ""); err != nil {
 		return err
 	}
 
 	blocks, sourceSubtitlePath, err := r.resolveSourceBlocks(ctx, job)
+	paths.SourcePath = sourceSubtitlePath
 	if err != nil {
-		_ = r.repo.UpdateJobProgress(ctx, jobID, "failed", "extract_subtitle", 10, "获取源字幕失败", sourceSubtitlePath, "", err.Error())
+		_ = r.repo.UpdateJobProgress(ctx, jobID, "failed", "extract_subtitle", 10, "获取源字幕失败", paths, err.Error())
 		return err
 	}
-	if err := r.repo.UpdateJobProgress(ctx, jobID, "running", "translate", 55, fmt.Sprintf("开始翻译，共 %d 条字幕", len(blocks)), sourceSubtitlePath, "", ""); err != nil {
+	if err := r.repo.UpdateJobProgress(ctx, jobID, "running", "translate", 55, fmt.Sprintf("开始翻译，共 %d 条字幕", len(blocks)), paths, ""); err != nil {
 		return err
 	}
 
 	translations, err := r.translator.TranslateBlocks(ctx, settings.TranslationPrompt, job.SourceLanguage, job.TargetLanguage, blocks, settings.MaxSubtitlePerBatch)
 	if err != nil {
-		_ = r.repo.UpdateJobProgress(ctx, jobID, "failed", "translate", 55, "字幕翻译失败", sourceSubtitlePath, "", err.Error())
+		_ = r.repo.UpdateJobProgress(ctx, jobID, "failed", "translate", 55, "字幕翻译失败", paths, err.Error())
 		return err
 	}
-	if err := r.repo.UpdateJobProgress(ctx, jobID, "running", "render", 85, "翻译完成，正在生成双语字幕", sourceSubtitlePath, "", ""); err != nil {
+	if err := r.repo.UpdateJobProgress(ctx, jobID, "running", "render", 85, "翻译完成，正在生成输出字幕", paths, ""); err != nil {
 		return err
 	}
 
-	bilingualContent, err := subtitle.RenderBilingualSRT(blocks, translations, settings.BilingualLayout)
+	outputs, err := r.renderOutputs(job, settings, blocks, translations)
 	if err != nil {
-		_ = r.repo.UpdateJobProgress(ctx, jobID, "failed", "render", 85, "双语字幕生成失败", sourceSubtitlePath, "", err.Error())
+		_ = r.repo.UpdateJobProgress(ctx, jobID, "failed", "render", 85, "字幕文件生成失败", paths, err.Error())
 		return err
 	}
-	outputPath, err := media.WriteBilingualSRT(job.MediaPath, settings.MediaPaths, r.cfg.SubtitleOutputPath, job.TargetLanguage, bilingualContent)
-	if err != nil {
-		_ = r.repo.UpdateJobProgress(ctx, jobID, "failed", "render", 85, "字幕文件写入失败", sourceSubtitlePath, "", err.Error())
-		return err
-	}
-	return r.repo.UpdateJobProgress(ctx, jobID, "completed", "completed", 100, "双语字幕已生成", sourceSubtitlePath, outputPath, "")
+	paths.PrimaryPath = outputs.PrimaryPath
+	paths.SRTPath = outputs.SRTPath
+	paths.ASSPath = outputs.ASSPath
+	return r.repo.UpdateJobProgress(ctx, jobID, "completed", "completed", 100, "字幕输出已生成，可进入详情页校对", paths, "")
 }
 
 func (r *Runner) resolveSourceBlocks(ctx context.Context, job model.SubtitleJob) ([]subtitle.Block, string, error) {
 	path, err := media.ExtractSubtitleSource(ctx, r.cfg.FFmpegBin, job.MediaPath, r.cfg.WorkDir)
 	if err == nil {
-		if parseErr := r.repo.UpdateJobProgress(ctx, job.ID, "running", "parse_subtitle", 30, "已取得源字幕，正在解析 SRT", path, "", ""); parseErr != nil {
+		if parseErr := r.repo.UpdateJobProgress(ctx, job.ID, "running", "parse_subtitle", 30, "已取得源字幕，正在解析 SRT", db.JobOutputPaths{SourcePath: path}, ""); parseErr != nil {
 			return nil, path, parseErr
 		}
 		blocks, parseErr := subtitle.ParseFile(path)
@@ -137,14 +141,14 @@ func (r *Runner) resolveSourceBlocks(ctx context.Context, job model.SubtitleJob)
 	if !r.asr.Ready() {
 		return nil, "", fmt.Errorf("未找到可用字幕，且 ASR 未配置: %w", err)
 	}
-	if progressErr := r.repo.UpdateJobProgress(ctx, job.ID, "running", "extract_audio", 20, "未找到可用字幕，转为提取音频进行 ASR", "", "", ""); progressErr != nil {
+	if progressErr := r.repo.UpdateJobProgress(ctx, job.ID, "running", "extract_audio", 20, "未找到可用字幕，转为提取音频进行 ASR", db.JobOutputPaths{}, ""); progressErr != nil {
 		return nil, "", progressErr
 	}
 	audioPath, audioErr := media.ExtractAudio(ctx, r.cfg.FFmpegBin, job.MediaPath, r.cfg.WorkDir)
 	if audioErr != nil {
 		return nil, "", audioErr
 	}
-	if progressErr := r.repo.UpdateJobProgress(ctx, job.ID, "running", "transcribe", 40, "音频提取完成，正在调用 ASR 转写", "", "", ""); progressErr != nil {
+	if progressErr := r.repo.UpdateJobProgress(ctx, job.ID, "running", "transcribe", 40, "音频提取完成，正在调用 ASR 转写", db.JobOutputPaths{}, ""); progressErr != nil {
 		return nil, "", progressErr
 	}
 	blocks, transcribeErr := r.asr.Transcribe(ctx, audioPath, job.SourceLanguage)
@@ -157,4 +161,70 @@ func (r *Runner) resolveSourceBlocks(ctx context.Context, job model.SubtitleJob)
 		return nil, "", writeErr
 	}
 	return blocks, sourcePath, nil
+}
+
+func (r *Runner) renderOutputs(job model.SubtitleJob, settings model.AppSettings, blocks []subtitle.Block, translations []string) (db.JobOutputPaths, error) {
+	requested := normalizeFormats(job.OutputFormats)
+	if len(requested) == 0 {
+		requested = []string{"srt", "ass"}
+	}
+	paths := db.JobOutputPaths{}
+	for _, format := range requested {
+		switch format {
+		case "srt":
+			content, err := subtitle.RenderBilingualSRT(blocks, translations, settings.BilingualLayout)
+			if err != nil {
+				return db.JobOutputPaths{}, err
+			}
+			path, err := media.WriteBilingualSRT(job.MediaPath, settings.MediaPaths, r.cfg.SubtitleOutputPath, job.TargetLanguage, content)
+			if err != nil {
+				return db.JobOutputPaths{}, err
+			}
+			paths.SRTPath = path
+		case "ass":
+			content, err := subtitle.RenderBilingualASS(blocks, translations, settings.BilingualLayout)
+			if err != nil {
+				return db.JobOutputPaths{}, err
+			}
+			path, err := media.WriteBilingualASS(job.MediaPath, settings.MediaPaths, r.cfg.SubtitleOutputPath, job.TargetLanguage, content)
+			if err != nil {
+				return db.JobOutputPaths{}, err
+			}
+			paths.ASSPath = path
+		}
+	}
+	paths.PrimaryPath = pickPrimaryPath(requested, paths)
+	return paths, nil
+}
+
+func normalizeFormats(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		trimmed := strings.ToLower(strings.TrimSpace(value))
+		if trimmed != "srt" && trimmed != "ass" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	return result
+}
+
+func pickPrimaryPath(formats []string, paths db.JobOutputPaths) string {
+	for _, format := range formats {
+		if format == "srt" && paths.SRTPath != "" {
+			return paths.SRTPath
+		}
+		if format == "ass" && paths.ASSPath != "" {
+			return paths.ASSPath
+		}
+	}
+	if paths.SRTPath != "" {
+		return paths.SRTPath
+	}
+	return paths.ASSPath
 }

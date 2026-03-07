@@ -72,13 +72,13 @@ export function getJobPreview(id, kind = 'output') {
   return apiRequest(`/api/v1/jobs/${id}/preview?kind=${encodeURIComponent(kind)}`)
 }
 
-export function saveJobPreview(id, content) {
-  return apiRequest(`/api/v1/jobs/${id}/preview`, {
+export function saveJobPreview(id, kind, content) {
+  return apiRequest(`/api/v1/jobs/${id}/preview?kind=${encodeURIComponent(kind)}`, {
     method: 'PUT',
     body: JSON.stringify({ content })
   })
 }
 
-export function getJobDownloadURL(id) {
-  return `/api/v1/jobs/${id}/download`
+export function getJobDownloadURL(id, kind = 'output') {
+  return `/api/v1/jobs/${id}/download?kind=${encodeURIComponent(kind)}`
 }

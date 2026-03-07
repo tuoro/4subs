@@ -47,11 +47,11 @@ func ParseSRT(content string) ([]Block, error) {
 		if len(timeParts) != 2 {
 			continue
 		}
-		start, err := parseTimestamp(strings.TrimSpace(timeParts[0]))
+		start, err := parseSRTTimestamp(strings.TrimSpace(timeParts[0]))
 		if err != nil {
 			continue
 		}
-		end, err := parseTimestamp(strings.TrimSpace(timeParts[1]))
+		end, err := parseSRTTimestamp(strings.TrimSpace(timeParts[1]))
 		if err != nil {
 			continue
 		}
@@ -78,9 +78,9 @@ func RenderSRT(blocks []Block) string {
 	for index, block := range blocks {
 		builder.WriteString(strconv.Itoa(index + 1))
 		builder.WriteString("\n")
-		builder.WriteString(formatTimestamp(block.Start))
+		builder.WriteString(formatSRTTimestamp(block.Start))
 		builder.WriteString(" --> ")
-		builder.WriteString(formatTimestamp(block.End))
+		builder.WriteString(formatSRTTimestamp(block.End))
 		builder.WriteString("\n")
 		for _, line := range block.Lines {
 			builder.WriteString(strings.TrimSpace(line))
@@ -99,9 +99,9 @@ func RenderBilingualSRT(blocks []Block, translations []string, layout string) (s
 	for index, block := range blocks {
 		builder.WriteString(strconv.Itoa(index + 1))
 		builder.WriteString("\n")
-		builder.WriteString(formatTimestamp(block.Start))
+		builder.WriteString(formatSRTTimestamp(block.Start))
 		builder.WriteString(" --> ")
-		builder.WriteString(formatTimestamp(block.End))
+		builder.WriteString(formatSRTTimestamp(block.End))
 		builder.WriteString("\n")
 		originLines := block.Lines
 		translationLines := splitTranslationLines(translations[index])
@@ -125,6 +125,37 @@ func RenderBilingualSRT(blocks []Block, translations []string, layout string) (s
 			}
 		}
 		builder.WriteString("\n")
+	}
+	return builder.String(), nil
+}
+
+func RenderBilingualASS(blocks []Block, translations []string, layout string) (string, error) {
+	if len(blocks) != len(translations) {
+		return "", errors.New("字幕块与翻译数量不一致")
+	}
+	var builder strings.Builder
+	builder.WriteString("[Script Info]\n")
+	builder.WriteString("Title: 4subs Bilingual ASS\n")
+	builder.WriteString("ScriptType: v4.00+\n")
+	builder.WriteString("WrapStyle: 2\n")
+	builder.WriteString("ScaledBorderAndShadow: yes\n")
+	builder.WriteString("PlayResX: 1920\n")
+	builder.WriteString("PlayResY: 1080\n\n")
+	builder.WriteString("[V4+ Styles]\n")
+	builder.WriteString("Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n")
+	builder.WriteString("Style: Default,Microsoft YaHei,32,&H00FFFFFF,&H000000FF,&H64000000,&H32000000,0,0,0,0,100,100,0,0,1,2,0,2,40,40,36,1\n\n")
+	builder.WriteString("[Events]\n")
+	builder.WriteString("Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n")
+	for index, block := range blocks {
+		originText := escapeASSText(strings.Join(block.Lines, "\\N"))
+		translationText := escapeASSText(strings.Join(splitTranslationLines(translations[index]), "\\N"))
+		var eventText string
+		if strings.TrimSpace(layout) == "translation_above" {
+			eventText = fmt.Sprintf("{\\fs26\\c&H00A5FF&}%s\\N{\\rDefault\\fs32\\c&H00FFFFFF&}%s", translationText, originText)
+		} else {
+			eventText = fmt.Sprintf("{\\fs32\\c&H00FFFFFF&}%s\\N{\\fs26\\c&H00A5FF&}%s", originText, translationText)
+		}
+		builder.WriteString(fmt.Sprintf("Dialogue: 0,%s,%s,Default,,0,0,0,,%s\n", formatASSTimestamp(block.Start), formatASSTimestamp(block.End), eventText))
 	}
 	return builder.String(), nil
 }
@@ -160,7 +191,7 @@ func splitNonEmptyLines(chunk string) []string {
 	return result
 }
 
-func parseTimestamp(raw string) (time.Duration, error) {
+func parseSRTTimestamp(raw string) (time.Duration, error) {
 	parts := strings.Split(raw, ",")
 	if len(parts) != 2 {
 		return 0, fmt.Errorf("非法时间戳: %s", raw)
@@ -188,11 +219,30 @@ func parseTimestamp(raw string) (time.Duration, error) {
 	return time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute + time.Duration(seconds)*time.Second + time.Duration(milliseconds)*time.Millisecond, nil
 }
 
-func formatTimestamp(value time.Duration) string {
+func formatSRTTimestamp(value time.Duration) string {
 	totalMilliseconds := value.Milliseconds()
 	hours := totalMilliseconds / 3600000
 	minutes := (totalMilliseconds % 3600000) / 60000
 	seconds := (totalMilliseconds % 60000) / 1000
 	milliseconds := totalMilliseconds % 1000
 	return fmt.Sprintf("%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds)
+}
+
+func formatASSTimestamp(value time.Duration) string {
+	centiseconds := value.Milliseconds() / 10
+	hours := centiseconds / 360000
+	minutes := (centiseconds % 360000) / 6000
+	seconds := (centiseconds % 6000) / 100
+	remainder := centiseconds % 100
+	return fmt.Sprintf("%d:%02d:%02d.%02d", hours, minutes, seconds, remainder)
+}
+
+func escapeASSText(value string) string {
+	value = strings.ReplaceAll(value, "\\", `\\`)
+	value = strings.ReplaceAll(value, "{", `\{`)
+	value = strings.ReplaceAll(value, "}", `\}`)
+	value = strings.ReplaceAll(value, "\r\n", `\N`)
+	value = strings.ReplaceAll(value, "\n", `\N`)
+	value = strings.ReplaceAll(value, "\r", `\N`)
+	return value
 }

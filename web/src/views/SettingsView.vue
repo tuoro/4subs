@@ -34,7 +34,7 @@
 
           <div class="field-group">
             <label class="field-label">输出格式</label>
-            <input v-model="outputFormatsText" class="field-input" placeholder="当前仅支持 srt" />
+            <input v-model="outputFormatsText" class="field-input" placeholder="srt,ass" />
           </div>
 
           <div class="field-group">
@@ -80,7 +80,7 @@ const form = reactive({
 })
 
 const mediaPathsText = ref('')
-const outputFormatsText = ref('srt')
+const outputFormatsText = ref('srt,ass')
 const saving = ref(false)
 const message = ref('')
 const errorMessage = ref('')
@@ -105,7 +105,7 @@ async function handleSave() {
     const payload = {
       ...form,
       media_paths: mediaPathsText.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
-      output_formats: outputFormatsText.value.split(',').map((item) => item.trim()).filter((item) => item === 'srt')
+      output_formats: outputFormatsText.value.split(',').map((item) => item.trim()).filter((item) => item === 'srt' || item === 'ass')
     }
     const saved = await saveSettings(payload)
     mediaPathsText.value = (saved.media_paths || []).join('\n')

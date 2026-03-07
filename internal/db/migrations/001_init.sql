@@ -49,6 +49,8 @@ CREATE TABLE subtitle_jobs (
     output_formats_json TEXT NOT NULL,
     source_subtitle_path TEXT NOT NULL DEFAULT '',
     output_subtitle_path TEXT NOT NULL DEFAULT '',
+    output_srt_path TEXT NOT NULL DEFAULT '',
+    output_ass_path TEXT NOT NULL DEFAULT '',
     details TEXT NOT NULL DEFAULT '',
     error_message TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,

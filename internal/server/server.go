@@ -153,7 +153,7 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 	}
 	response := model.Overview{
 		AppName:          "4subs",
-		AppSummary:       "当前版本已支持源字幕直译、远程 ASR 回退，以及双语 SRT 预览与人工校对。",
+		AppSummary:       "当前版本已支持 SRT/ASS 双格式输出，并在任务详情页进行预览与人工校对。",
 		TranslationReady: s.translator.Ready(),
 		AsrReady:         s.asr.Ready(),
 		MediaAssetCount:  mediaCount,
@@ -311,7 +311,13 @@ func (s *Server) handleRetryJob(writer http.ResponseWriter, request *http.Reques
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	if err := s.repo.UpdateJobProgress(request.Context(), job.ID, "queued", "queued", 0, "任务已重新排队", "", "", ""); err != nil {
+	paths := db.JobOutputPaths{
+		SourcePath:  "",
+		PrimaryPath: "",
+		SRTPath:     "",
+		ASSPath:     "",
+	}
+	if err := s.repo.UpdateJobProgress(request.Context(), job.ID, "queued", "queued", 0, "任务已重新排队", paths, ""); err != nil {
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
@@ -334,16 +340,27 @@ func (s *Server) handleDownloadJobResult(writer http.ResponseWriter, request *ht
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	if strings.TrimSpace(job.OutputSubtitlePath) == "" {
-		s.writeError(writer, http.StatusNotFound, fmt.Errorf("任务尚未生成输出字幕"))
+	targetPath := strings.TrimSpace(job.OutputSubtitlePath)
+	switch strings.ToLower(strings.TrimSpace(request.URL.Query().Get("kind"))) {
+	case "srt":
+		targetPath = strings.TrimSpace(job.OutputSRTPath)
+	case "ass":
+		targetPath = strings.TrimSpace(job.OutputASSPath)
+	case "", "output":
+	default:
+		s.writeError(writer, http.StatusBadRequest, fmt.Errorf("不支持的下载类型"))
 		return
 	}
-	if _, err := os.Stat(job.OutputSubtitlePath); err != nil {
+	if targetPath == "" {
+		s.writeError(writer, http.StatusNotFound, fmt.Errorf("任务尚未生成对应字幕"))
+		return
+	}
+	if _, err := os.Stat(targetPath); err != nil {
 		s.writeError(writer, http.StatusNotFound, fmt.Errorf("输出字幕文件不存在"))
 		return
 	}
-	writer.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(job.OutputSubtitlePath)))
-	http.ServeFile(writer, request, job.OutputSubtitlePath)
+	writer.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(targetPath)))
+	http.ServeFile(writer, request, targetPath)
 }
 
 func (s *Server) handleGetJobPreview(writer http.ResponseWriter, request *http.Request) {
@@ -378,7 +395,22 @@ func (s *Server) handleSaveJobPreview(writer http.ResponseWriter, request *http.
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	if strings.TrimSpace(job.OutputSubtitlePath) == "" {
+	kind := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("kind")))
+	if kind == "" {
+		kind = "output"
+	}
+	var targetPath string
+	switch kind {
+	case "output", "srt":
+		targetPath = strings.TrimSpace(job.OutputSRTPath)
+		kind = "srt"
+	case "ass":
+		targetPath = strings.TrimSpace(job.OutputASSPath)
+	default:
+		s.writeError(writer, http.StatusBadRequest, fmt.Errorf("该类型字幕不可编辑"))
+		return
+	}
+	if targetPath == "" {
 		s.writeError(writer, http.StatusBadRequest, fmt.Errorf("任务还没有可编辑的输出字幕"))
 		return
 	}
@@ -392,15 +424,38 @@ func (s *Server) handleSaveJobPreview(writer http.ResponseWriter, request *http.
 		s.writeError(writer, http.StatusBadRequest, fmt.Errorf("字幕内容不能为空"))
 		return
 	}
-	if err := os.WriteFile(job.OutputSubtitlePath, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(targetPath, []byte(content), 0o644); err != nil {
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	if err := s.repo.UpdateJobProgress(request.Context(), job.ID, job.Status, job.CurrentStage, job.Progress, "字幕已人工保存", job.SourceSubtitlePath, job.OutputSubtitlePath, ""); err != nil {
+	paths := db.JobOutputPaths{
+		SourcePath:  job.SourceSubtitlePath,
+		PrimaryPath: choosePrimaryOutputPath(job.OutputFormats, job.OutputSRTPath, job.OutputASSPath),
+		SRTPath:     job.OutputSRTPath,
+		ASSPath:     job.OutputASSPath,
+	}
+	if kind == "srt" {
+		paths.SRTPath = targetPath
+		paths.PrimaryPath = choosePrimaryOutputPath(job.OutputFormats, targetPath, job.OutputASSPath)
+		if paths.PrimaryPath == "" {
+			paths.PrimaryPath = targetPath
+		}
+		job.OutputSRTPath = targetPath
+	}
+	if kind == "ass" {
+		paths.ASSPath = targetPath
+		paths.PrimaryPath = choosePrimaryOutputPath(job.OutputFormats, job.OutputSRTPath, targetPath)
+		if paths.PrimaryPath == "" {
+			paths.PrimaryPath = targetPath
+		}
+		job.OutputASSPath = targetPath
+	}
+	job.OutputSubtitlePath = paths.PrimaryPath
+	if err := s.repo.UpdateJobProgress(request.Context(), job.ID, job.Status, job.CurrentStage, job.Progress, fmt.Sprintf("%s 字幕已人工保存", strings.ToUpper(kind)), paths, ""); err != nil {
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	fresh, err := s.readPreview(job, "output")
+	fresh, err := s.readPreview(job, kind)
 	if err != nil {
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
@@ -415,6 +470,12 @@ func (s *Server) readPreview(job model.SubtitleJob, kind string) (previewRespons
 	case "source":
 		targetPath = strings.TrimSpace(job.SourceSubtitlePath)
 		preview.Editable = false
+	case "srt":
+		targetPath = strings.TrimSpace(job.OutputSRTPath)
+		preview.Editable = true
+	case "ass":
+		targetPath = strings.TrimSpace(job.OutputASSPath)
+		preview.Editable = true
 	case "output":
 		targetPath = strings.TrimSpace(job.OutputSubtitlePath)
 		preview.Editable = true
@@ -453,7 +514,7 @@ func (s *Server) writeError(writer http.ResponseWriter, status int, err error) {
 
 func normalizeSettings(settings model.AppSettings) model.AppSettings {
 	settings.MediaPaths = trimNonEmpty(settings.MediaPaths)
-	settings.OutputFormats = normalizeFormats(settings.OutputFormats, []string{"srt"})
+	settings.OutputFormats = normalizeFormats(settings.OutputFormats, []string{"srt", "ass"})
 	settings.SourceLanguage = firstNonEmpty(settings.SourceLanguage, "auto")
 	settings.TargetLanguage = firstNonEmpty(settings.TargetLanguage, "zh-CN")
 	settings.BilingualLayout = firstNonEmpty(settings.BilingualLayout, "origin_above")
@@ -482,7 +543,7 @@ func normalizeFormats(values []string, fallback []string) []string {
 	seen := map[string]struct{}{}
 	for _, value := range values {
 		trimmed := strings.ToLower(strings.TrimSpace(value))
-		if trimmed == "" || trimmed != "srt" {
+		if trimmed != "srt" && trimmed != "ass" {
 			continue
 		}
 		if _, ok := seen[trimmed]; ok {
@@ -495,6 +556,22 @@ func normalizeFormats(values []string, fallback []string) []string {
 		return fallback
 	}
 	return result
+}
+
+func choosePrimaryOutputPath(formats []string, srtPath string, assPath string) string {
+	for _, format := range formats {
+		trimmed := strings.ToLower(strings.TrimSpace(format))
+		if trimmed == "srt" && strings.TrimSpace(srtPath) != "" {
+			return srtPath
+		}
+		if trimmed == "ass" && strings.TrimSpace(assPath) != "" {
+			return assPath
+		}
+	}
+	if strings.TrimSpace(srtPath) != "" {
+		return srtPath
+	}
+	return assPath
 }
 
 func firstNonEmpty(values ...string) string {

@@ -18,8 +18,8 @@
 4. 如果没有可用字幕，则提取音频并调用远程 ASR 转写
 5. 解析为标准 `SRT` 字幕块
 6. 按批次调用 `DeepSeek Chat Completions` 翻译
-7. 生成双语 `SRT` 到输出目录
-8. 在任务详情页预览源字幕和双语字幕，并支持人工校对后保存
+7. 生成双语 `SRT` 与 `ASS` 到输出目录
+8. 在任务详情页预览源字幕、双语 `SRT/ASS`，并支持人工校对后保存
 
 ## 当前 API
 
@@ -34,9 +34,9 @@
 - `GET /api/v1/jobs/{id}`
 - `POST /api/v1/jobs`
 - `POST /api/v1/jobs/{id}/retry`
-- `GET /api/v1/jobs/{id}/download`
-- `GET /api/v1/jobs/{id}/preview?kind=source|output`
-- `PUT /api/v1/jobs/{id}/preview`
+- `GET /api/v1/jobs/{id}/download?kind=output|srt|ass`
+- `GET /api/v1/jobs/{id}/preview?kind=source|output|srt|ass`
+- `PUT /api/v1/jobs/{id}/preview?kind=srt|ass`
 
 ## 关键能力边界
 
@@ -47,12 +47,12 @@
 - 找不到字幕时自动回退到远程 ASR 转写
 - DeepSeek 批量翻译
 - 双语 `SRT` 输出
+- 双语 `ASS` 输出
 - 在线预览与人工校对保存
 
 当前版本暂未支持：
 
 - 图片字幕 `OCR`
-- `ASS` 样式导出
 - 多人协作审校
 - 任务取消与并发队列调度
 
@@ -63,7 +63,7 @@
 - `internal/db`：SQLite 持久化、任务状态与设置存储
 - `internal/library`：本地媒体扫描
 - `internal/media`：字幕源提取、音频提取与结果落盘
-- `internal/subtitle`：SRT 解析与双语渲染
+- `internal/subtitle`：SRT/ASS 渲染与字幕解析
 - `internal/jobrunner`：后台任务执行器
 - `internal/translator/deepseek`：DeepSeek 翻译接入
 - `internal/asr/openai`：OpenAI 兼容音频转写接入
@@ -133,6 +133,6 @@ ghcr.io/<owner>/<repo>
 最值得继续做的功能顺序：
 
 1. 增加任务取消与并发控制
-2. 增加 `ASS` 导出
-3. 增加 OCR 字幕提取
-4. 增加术语表和翻译风格模板
+2. 增加 OCR 字幕提取
+3. 增加术语表和翻译风格模板
+4. 增加字幕版本管理

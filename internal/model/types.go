@@ -40,6 +40,8 @@ type SubtitleJob struct {
 	OutputFormats      []string  `json:"output_formats"`
 	SourceSubtitlePath string    `json:"source_subtitle_path,omitempty"`
 	OutputSubtitlePath string    `json:"output_subtitle_path,omitempty"`
+	OutputSRTPath      string    `json:"output_srt_path,omitempty"`
+	OutputASSPath      string    `json:"output_ass_path,omitempty"`
 	Details            string    `json:"details,omitempty"`
 	ErrorMessage       string    `json:"error_message,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`

@@ -87,13 +87,22 @@ func WriteTextFile(outputPath string, content string) (string, error) {
 }
 
 func WriteBilingualSRT(mediaPath string, mediaRoots []string, outputRoot string, targetLanguage string, content string) (string, error) {
+	return WriteBilingualFile(mediaPath, mediaRoots, outputRoot, targetLanguage, ".srt", "bilingual", content)
+}
+
+func WriteBilingualASS(mediaPath string, mediaRoots []string, outputRoot string, targetLanguage string, content string) (string, error) {
+	return WriteBilingualFile(mediaPath, mediaRoots, outputRoot, targetLanguage, ".ass", "bilingual", content)
+}
+
+func WriteBilingualFile(mediaPath string, mediaRoots []string, outputRoot string, targetLanguage string, extension string, suffix string, content string) (string, error) {
 	relativeDir := relativeMediaDir(mediaPath, mediaRoots)
 	targetDir := filepath.Join(outputRoot, relativeDir)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return "", err
 	}
 	baseName := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
-	fileName := fmt.Sprintf("%s.%s.bilingual.srt", baseName, strings.ToLower(strings.ReplaceAll(targetLanguage, "_", "-")))
+	languageCode := strings.ToLower(strings.ReplaceAll(targetLanguage, "_", "-"))
+	fileName := fmt.Sprintf("%s.%s.%s%s", baseName, languageCode, suffix, extension)
 	targetPath := filepath.Join(targetDir, fileName)
 	if err := os.WriteFile(targetPath, []byte(content), 0o644); err != nil {
 		return "", err

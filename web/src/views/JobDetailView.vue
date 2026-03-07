@@ -11,8 +11,9 @@
             <RouterLink to="/" class="nav-link">返回总览</RouterLink>
             <Button label="刷新" icon="pi pi-refresh" severity="secondary" @click="loadAll" :loading="loading" />
             <Button v-if="job?.status === 'failed'" label="重试任务" severity="danger" @click="handleRetry" />
-            <a v-if="job?.output_subtitle_path" :href="getJobDownloadURL(job.id)" class="nav-link">下载 SRT</a>
-            <Button v-if="outputPreview.editable && outputPreview.exists" label="保存修改" icon="pi pi-save" @click="handleSave" :loading="saving" />
+            <a v-if="job?.output_srt_path" :href="getJobDownloadURL(job.id, 'srt')" class="nav-link">下载 SRT</a>
+            <a v-if="job?.output_ass_path" :href="getJobDownloadURL(job.id, 'ass')" class="nav-link">下载 ASS</a>
+            <Button v-if="activeOutputPreview.editable && activeOutputPreview.exists" label="保存修改" icon="pi pi-save" @click="handleSave" :loading="saving" />
           </div>
         </div>
       </template>
@@ -51,12 +52,15 @@
           <Card class="span-6 review-card">
             <template #title>
               <div class="card-title-row">
-                <h3>双语字幕校对</h3>
-                <Tag :value="outputPreview.exists ? '可编辑' : '待生成'" :severity="outputPreview.exists ? 'info' : 'warn'" />
+                <h3>输出字幕校对</h3>
+                <div class="action-row">
+                  <Button label="SRT" size="small" :severity="activePreviewKind === 'srt' ? 'primary' : 'secondary'" @click="switchPreview('srt')" />
+                  <Button label="ASS" size="small" :severity="activePreviewKind === 'ass' ? 'primary' : 'secondary'" @click="switchPreview('ass')" />
+                </div>
               </div>
             </template>
             <template #content>
-              <textarea v-model="editableOutput" class="field-textarea preview-textarea" :readonly="!outputPreview.editable || !outputPreview.exists" placeholder="双语字幕生成后可在这里人工修订"></textarea>
+              <textarea v-model="editableOutput" class="field-textarea preview-textarea" :readonly="!activeOutputPreview.editable || !activeOutputPreview.exists" :placeholder="activePreviewKind === 'ass' ? 'ASS 字幕生成后可在这里人工修订' : 'SRT 字幕生成后可在这里人工修订'"></textarea>
             </template>
           </Card>
         </div>
@@ -73,7 +77,8 @@
           <div class="tip-item">
             <h3>文件路径</h3>
             <p>源字幕：{{ sourcePreview.path || '暂无' }}</p>
-            <p>输出字幕：{{ outputPreview.path || '暂无' }}</p>
+            <p>SRT 输出：{{ srtPreview.path || '暂无' }}</p>
+            <p>ASS 输出：{{ assPreview.path || '暂无' }}</p>
           </div>
         </div>
       </template>
@@ -82,7 +87,7 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import Button from 'primevue/button'
 import Card from 'primevue/card'
@@ -93,13 +98,17 @@ import { getJob, getJobDownloadURL, getJobPreview, retryJob, saveJobPreview } fr
 const route = useRoute()
 const job = ref(null)
 const sourcePreview = ref({ exists: false, content: '', path: '', editable: false })
-const outputPreview = ref({ exists: false, content: '', path: '', editable: false })
+const srtPreview = ref({ exists: false, content: '', path: '', editable: true })
+const assPreview = ref({ exists: false, content: '', path: '', editable: true })
+const activePreviewKind = ref('srt')
 const editableOutput = ref('')
 const loading = ref(false)
 const saving = ref(false)
 const errorMessage = ref('')
 const message = ref('')
 let timer = null
+
+const activeOutputPreview = computed(() => (activePreviewKind.value === 'ass' ? assPreview.value : srtPreview.value))
 
 async function loadAll() {
   try {
@@ -109,13 +118,26 @@ async function loadAll() {
     const jobId = route.params.id
     job.value = await getJob(jobId)
     sourcePreview.value = await getJobPreview(jobId, 'source')
-    outputPreview.value = await getJobPreview(jobId, 'output')
-    editableOutput.value = outputPreview.value.content || ''
+    srtPreview.value = await getJobPreview(jobId, 'srt')
+    assPreview.value = await getJobPreview(jobId, 'ass')
+    if (!srtPreview.value.exists && assPreview.value.exists) {
+      activePreviewKind.value = 'ass'
+    }
+    syncEditableOutput()
   } catch (error) {
     errorMessage.value = error.message
   } finally {
     loading.value = false
   }
+}
+
+function syncEditableOutput() {
+  editableOutput.value = activeOutputPreview.value.content || ''
+}
+
+function switchPreview(kind) {
+  activePreviewKind.value = kind
+  syncEditableOutput()
 }
 
 async function handleRetry() {
@@ -135,10 +157,15 @@ async function handleSave() {
     saving.value = true
     errorMessage.value = ''
     message.value = ''
-    outputPreview.value = await saveJobPreview(route.params.id, editableOutput.value)
-    editableOutput.value = outputPreview.value.content || ''
+    const saved = await saveJobPreview(route.params.id, activePreviewKind.value, editableOutput.value)
+    if (activePreviewKind.value === 'ass') {
+      assPreview.value = saved
+    } else {
+      srtPreview.value = saved
+    }
+    syncEditableOutput()
     job.value = await getJob(route.params.id)
-    message.value = '字幕修改已保存'
+    message.value = `${activePreviewKind.value.toUpperCase()} 字幕修改已保存`
   } catch (error) {
     errorMessage.value = error.message
   } finally {
