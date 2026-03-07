@@ -101,9 +101,9 @@
           <Column header="结果">
             <template #body="slotProps">
               <div class="action-row">
+                <RouterLink :to="`/jobs/${slotProps.data.id}`" class="nav-link">详情 / 校对</RouterLink>
                 <a v-if="slotProps.data.output_subtitle_path" :href="getJobDownloadURL(slotProps.data.id)" class="nav-link">下载 SRT</a>
                 <Button v-else-if="slotProps.data.status === 'failed'" label="重试" size="small" severity="danger" @click="handleRetry(slotProps.data.id)" />
-                <span v-else>处理中</span>
               </div>
             </template>
           </Column>

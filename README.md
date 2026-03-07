@@ -19,6 +19,7 @@
 5. 解析为标准 `SRT` 字幕块
 6. 按批次调用 `DeepSeek Chat Completions` 翻译
 7. 生成双语 `SRT` 到输出目录
+8. 在任务详情页预览源字幕和双语字幕，并支持人工校对后保存
 
 ## 当前 API
 
@@ -34,6 +35,8 @@
 - `POST /api/v1/jobs`
 - `POST /api/v1/jobs/{id}/retry`
 - `GET /api/v1/jobs/{id}/download`
+- `GET /api/v1/jobs/{id}/preview?kind=source|output`
+- `PUT /api/v1/jobs/{id}/preview`
 
 ## 关键能力边界
 
@@ -44,12 +47,13 @@
 - 找不到字幕时自动回退到远程 ASR 转写
 - DeepSeek 批量翻译
 - 双语 `SRT` 输出
+- 在线预览与人工校对保存
 
 当前版本暂未支持：
 
 - 图片字幕 `OCR`
 - `ASS` 样式导出
-- 人工逐条校对工作台
+- 多人协作审校
 - 任务取消与并发队列调度
 
 ## 新目录职责
@@ -64,7 +68,7 @@
 - `internal/translator/deepseek`：DeepSeek 翻译接入
 - `internal/asr/openai`：OpenAI 兼容音频转写接入
 - `internal/server`：HTTP API 与静态页面托管
-- `web/src/views`：PrimeVue 工作台页面
+- `web/src/views`：PrimeVue 工作台页面与任务校对页
 
 ## 环境变量
 
@@ -129,6 +133,6 @@ ghcr.io/<owner>/<repo>
 最值得继续做的功能顺序：
 
 1. 增加任务取消与并发控制
-2. 增加字幕预览与人工修订
-3. 增加 `ASS` 导出
-4. 增加 OCR 字幕提取
+2. 增加 `ASS` 导出
+3. 增加 OCR 字幕提取
+4. 增加术语表和翻译风格模板

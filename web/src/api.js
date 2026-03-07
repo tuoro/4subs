@@ -68,6 +68,17 @@ export function retryJob(id) {
   })
 }
 
+export function getJobPreview(id, kind = 'output') {
+  return apiRequest(`/api/v1/jobs/${id}/preview?kind=${encodeURIComponent(kind)}`)
+}
+
+export function saveJobPreview(id, content) {
+  return apiRequest(`/api/v1/jobs/${id}/preview`, {
+    method: 'PUT',
+    body: JSON.stringify({ content })
+  })
+}
+
 export function getJobDownloadURL(id) {
   return `/api/v1/jobs/${id}/download`
 }

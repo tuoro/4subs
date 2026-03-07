@@ -124,6 +124,10 @@ textarea {
   margin-top: 8px;
 }
 
+.stat-card .value.small {
+  font-size: 22px;
+}
+
 .card-title-row {
   display: flex;
   justify-content: space-between;
@@ -205,6 +209,20 @@ textarea {
   resize: vertical;
 }
 
+.preview-textarea {
+  min-height: 520px;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  line-height: 1.6;
+}
+
+.review-grid {
+  margin-top: 16px;
+}
+
+.review-card {
+  min-height: 100%;
+}
+
 .action-row {
   display: flex;
   gap: 12px;
@@ -234,4 +252,3 @@ textarea {
     align-items: flex-start;
   }
 }
-

@@ -42,6 +42,18 @@ type createJobRequest struct {
 	Details        string   `json:"details"`
 }
 
+type previewResponse struct {
+	Kind     string `json:"kind"`
+	Path     string `json:"path"`
+	Exists   bool   `json:"exists"`
+	Editable bool   `json:"editable"`
+	Content  string `json:"content"`
+}
+
+type previewSaveRequest struct {
+	Content string `json:"content"`
+}
+
 func New(cfg config.Config, repo *db.Repository) *Server {
 	translatorClient := deepseek.Client{
 		BaseURL: cfg.DeepSeekBaseURL,
@@ -79,6 +91,8 @@ func (s *Server) Routes() http.Handler {
 		api.Post("/jobs", s.handleCreateJob)
 		api.Post("/jobs/{id}/retry", s.handleRetryJob)
 		api.Get("/jobs/{id}/download", s.handleDownloadJobResult)
+		api.Get("/jobs/{id}/preview", s.handleGetJobPreview)
+		api.Put("/jobs/{id}/preview", s.handleSaveJobPreview)
 	})
 
 	staticDir := strings.TrimSpace(s.cfg.StaticDir)
@@ -139,7 +153,7 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 	}
 	response := model.Overview{
 		AppName:          "4subs",
-		AppSummary:       "当前版本已支持源字幕直译，并在找不到字幕时自动回退到远程 ASR 转写。",
+		AppSummary:       "当前版本已支持源字幕直译、远程 ASR 回退，以及双语 SRT 预览与人工校对。",
 		TranslationReady: s.translator.Ready(),
 		AsrReady:         s.asr.Ready(),
 		MediaAssetCount:  mediaCount,
@@ -330,6 +344,97 @@ func (s *Server) handleDownloadJobResult(writer http.ResponseWriter, request *ht
 	}
 	writer.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(job.OutputSubtitlePath)))
 	http.ServeFile(writer, request, job.OutputSubtitlePath)
+}
+
+func (s *Server) handleGetJobPreview(writer http.ResponseWriter, request *http.Request) {
+	job, err := s.repo.GetJob(request.Context(), chi.URLParam(request, "id"))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			s.writeError(writer, http.StatusNotFound, fmt.Errorf("任务不存在"))
+			return
+		}
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("kind")))
+	if kind == "" {
+		kind = "output"
+	}
+	payload, err := s.readPreview(job, kind)
+	if err != nil {
+		s.writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, payload)
+}
+
+func (s *Server) handleSaveJobPreview(writer http.ResponseWriter, request *http.Request) {
+	job, err := s.repo.GetJob(request.Context(), chi.URLParam(request, "id"))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			s.writeError(writer, http.StatusNotFound, fmt.Errorf("任务不存在"))
+			return
+		}
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	if strings.TrimSpace(job.OutputSubtitlePath) == "" {
+		s.writeError(writer, http.StatusBadRequest, fmt.Errorf("任务还没有可编辑的输出字幕"))
+		return
+	}
+	var payload previewSaveRequest
+	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+		s.writeError(writer, http.StatusBadRequest, fmt.Errorf("请求体解析失败: %w", err))
+		return
+	}
+	content := strings.ReplaceAll(payload.Content, "\r\n", "\n")
+	if strings.TrimSpace(content) == "" {
+		s.writeError(writer, http.StatusBadRequest, fmt.Errorf("字幕内容不能为空"))
+		return
+	}
+	if err := os.WriteFile(job.OutputSubtitlePath, []byte(content), 0o644); err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.repo.UpdateJobProgress(request.Context(), job.ID, job.Status, job.CurrentStage, job.Progress, "字幕已人工保存", job.SourceSubtitlePath, job.OutputSubtitlePath, ""); err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	fresh, err := s.readPreview(job, "output")
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, fresh)
+}
+
+func (s *Server) readPreview(job model.SubtitleJob, kind string) (previewResponse, error) {
+	preview := previewResponse{Kind: kind}
+	var targetPath string
+	switch kind {
+	case "source":
+		targetPath = strings.TrimSpace(job.SourceSubtitlePath)
+		preview.Editable = false
+	case "output":
+		targetPath = strings.TrimSpace(job.OutputSubtitlePath)
+		preview.Editable = true
+	default:
+		return previewResponse{}, fmt.Errorf("不支持的预览类型: %s", kind)
+	}
+	preview.Path = targetPath
+	if targetPath == "" {
+		return preview, nil
+	}
+	raw, err := os.ReadFile(targetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return preview, nil
+		}
+		return previewResponse{}, err
+	}
+	preview.Exists = true
+	preview.Content = string(raw)
+	return preview, nil
 }
 
 func (s *Server) writeJSON(writer http.ResponseWriter, status int, payload any) {
