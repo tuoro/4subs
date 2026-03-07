@@ -8,7 +8,7 @@
         </div>
       </template>
       <template #content>
-        <p class="card-subtle">这个页面展示新架构下的标准处理链路，便于你继续推进识别、翻译和渲染模块。</p>
+        <p class="card-subtle">当前已跑通的链路是：扫描媒体 -> 提取外挂/内嵌文本字幕 -> DeepSeek 翻译 -> 双语 SRT 输出。</p>
         <div class="pipeline-list">
           <div v-for="step in steps" :key="step.key" class="pipeline-item">
             <div class="card-title-row">
@@ -34,28 +34,32 @@
             <p>{{ runtime.work_dir || '未设置' }}</p>
           </div>
           <div class="tip-item">
-            <h3>字幕输出目录</h3>
+            <h3>输出目录</h3>
             <p>{{ runtime.subtitle_output_dir || '未设置' }}</p>
+          </div>
+          <div class="tip-item">
+            <h3>翻译提供方</h3>
+            <p>{{ runtime.translation_provider || '未设置' }}</p>
           </div>
         </div>
       </template>
     </Card>
 
     <Card class="span-6">
-      <template #title><h2>下一步开发建议</h2></template>
+      <template #title><h2>当前限制</h2></template>
       <template #content>
         <div class="tip-list">
           <div class="tip-item">
-            <h3>先做任务执行器</h3>
-            <p>把当前“仅创建任务”的骨架扩展成可串行执行音频提取、识别、翻译和导出的后台任务。</p>
+            <h3>已支持</h3>
+            <p>同名外挂字幕，或视频容器内嵌的文本字幕轨提取与翻译。</p>
           </div>
           <div class="tip-item">
-            <h3>再接 ASR 适配层</h3>
-            <p>先统一输出字幕块结构，保证时间轴与文本切分稳定，再交给翻译层处理。</p>
+            <h3>暂未支持</h3>
+            <p>纯音频 ASR 识别、图片字幕 OCR、ASS 样式导出和人工逐条校对。</p>
           </div>
           <div class="tip-item">
-            <h3>最后加人工校对</h3>
-            <p>加字幕预览与人工修正页面，可以显著提升成品质量和可用性。</p>
+            <h3>下一步</h3>
+            <p>后续最值得补的是 ASR 适配层，这样无源字幕的视频也能直接生成双语字幕。</p>
           </div>
         </div>
       </template>
@@ -87,4 +91,3 @@ async function loadPipeline() {
 
 onMounted(loadPipeline)
 </script>
-

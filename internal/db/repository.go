@@ -1,4 +1,4 @@
-﻿package db
+package db
 
 import (
 	"context"
@@ -19,6 +19,8 @@ import (
 
 //go:embed migrations/001_init.sql
 var initSQL string
+
+const schemaVersion = 1
 
 type Repository struct {
 	db *sql.DB
@@ -52,7 +54,17 @@ func Open(dbPath string) (*sql.DB, error) {
 }
 
 func migrate(database *sql.DB) error {
-	_, err := database.Exec(initSQL)
+	var version int
+	if err := database.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version == schemaVersion {
+		return nil
+	}
+	if _, err := database.Exec(initSQL); err != nil {
+		return err
+	}
+	_, err := database.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
 	return err
 }
 
@@ -68,7 +80,6 @@ func (r *Repository) EnsureDefaults(ctx context.Context, cfg config.Config) erro
 	if count > 0 {
 		return nil
 	}
-
 	settings := model.AppSettings{
 		MediaPaths:          cfg.MediaPaths,
 		SourceLanguage:      "auto",
@@ -77,8 +88,8 @@ func (r *Repository) EnsureDefaults(ctx context.Context, cfg config.Config) erro
 		OutputFormats:       []string{"srt"},
 		TranslationProvider: cfg.TranslationProvider,
 		TranslationModel:    cfg.DeepSeekModel,
-		TranslationPrompt:   "逐条翻译字幕文本，保留原意、语气和专有名词，不要合并条目。",
-		MaxSubtitlePerBatch: 30,
+		TranslationPrompt:   "请逐条翻译字幕文本，只输出目标语言译文，不要解释，不要合并或拆分字幕。",
+		MaxSubtitlePerBatch: 20,
 		UpdatedAt:           time.Now().UTC(),
 	}
 	return r.SaveSettings(ctx, settings)
@@ -142,8 +153,11 @@ func (r *Repository) SaveSettings(ctx context.Context, settings model.AppSetting
 	if strings.TrimSpace(settings.TranslationModel) == "" {
 		settings.TranslationModel = "deepseek-chat"
 	}
+	if strings.TrimSpace(settings.TranslationPrompt) == "" {
+		settings.TranslationPrompt = "请逐条翻译字幕文本，只输出目标语言译文，不要解释，不要合并或拆分字幕。"
+	}
 	if settings.MaxSubtitlePerBatch <= 0 {
-		settings.MaxSubtitlePerBatch = 30
+		settings.MaxSubtitlePerBatch = 20
 	}
 	settings.UpdatedAt = time.Now().UTC()
 
@@ -201,7 +215,6 @@ func (r *Repository) ReplaceMediaAssets(ctx context.Context, assets []model.Medi
 	if _, err = transaction.ExecContext(ctx, `DELETE FROM media_assets`); err != nil {
 		return err
 	}
-
 	statement, err := transaction.PrepareContext(ctx, `
 		INSERT INTO media_assets (title, root_path, relative_path, file_path, file_size, status, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`)
@@ -227,9 +240,7 @@ func (r *Repository) ReplaceMediaAssets(ctx context.Context, assets []model.Medi
 			return err
 		}
 	}
-
-	err = transaction.Commit()
-	return err
+	return transaction.Commit()
 }
 
 func (r *Repository) ListMediaAssets(ctx context.Context, limit int) ([]model.MediaAsset, error) {
@@ -250,22 +261,26 @@ func (r *Repository) ListMediaAssets(ctx context.Context, limit int) ([]model.Me
 	for rows.Next() {
 		var asset model.MediaAsset
 		var updatedAtRaw string
-		if err := rows.Scan(
-			&asset.ID,
-			&asset.Title,
-			&asset.RootPath,
-			&asset.RelativePath,
-			&asset.FilePath,
-			&asset.FileSize,
-			&asset.Status,
-			&updatedAtRaw,
-		); err != nil {
+		if err := rows.Scan(&asset.ID, &asset.Title, &asset.RootPath, &asset.RelativePath, &asset.FilePath, &asset.FileSize, &asset.Status, &updatedAtRaw); err != nil {
 			return nil, err
 		}
 		asset.UpdatedAt = parseTime(updatedAtRaw)
 		assets = append(assets, asset)
 	}
 	return assets, rows.Err()
+}
+
+func (r *Repository) GetMediaAsset(ctx context.Context, id int64) (model.MediaAsset, error) {
+	var asset model.MediaAsset
+	var updatedAtRaw string
+	row := r.db.QueryRowContext(ctx, `
+		SELECT id, title, root_path, relative_path, file_path, file_size, status, updated_at
+		FROM media_assets WHERE id = ?`, id)
+	if err := row.Scan(&asset.ID, &asset.Title, &asset.RootPath, &asset.RelativePath, &asset.FilePath, &asset.FileSize, &asset.Status, &updatedAtRaw); err != nil {
+		return model.MediaAsset{}, err
+	}
+	asset.UpdatedAt = parseTime(updatedAtRaw)
+	return asset, nil
 }
 
 func (r *Repository) CreateJob(ctx context.Context, input CreateJobInput) (model.SubtitleJob, error) {
@@ -287,12 +302,10 @@ func (r *Repository) CreateJob(ctx context.Context, input CreateJobInput) (model
 	if strings.TrimSpace(input.TargetLanguage) == "" {
 		input.TargetLanguage = "zh-CN"
 	}
-
 	outputFormatsJSON, err := json.Marshal(input.OutputFormats)
 	if err != nil {
 		return model.SubtitleJob{}, err
 	}
-
 	now := time.Now().UTC()
 	job := model.SubtitleJob{
 		ID:             fmt.Sprintf("job_%d", now.UnixNano()),
@@ -310,31 +323,50 @@ func (r *Repository) CreateJob(ctx context.Context, input CreateJobInput) (model
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-
 	_, err = r.db.ExecContext(ctx, `
 		INSERT INTO subtitle_jobs (
 			id, media_asset_id, media_path, file_name, status, current_stage, progress,
-			source_language, target_language, provider, output_formats_json, details,
-			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		job.ID,
-		nullableInt64(job.MediaAssetID),
-		job.MediaPath,
-		job.FileName,
-		job.Status,
-		job.CurrentStage,
-		job.Progress,
-		job.SourceLanguage,
-		job.TargetLanguage,
-		job.Provider,
-		string(outputFormatsJSON),
-		job.Details,
-		job.CreatedAt.Format(time.RFC3339),
-		job.UpdatedAt.Format(time.RFC3339),
+			source_language, target_language, provider, output_formats_json,
+			source_subtitle_path, output_subtitle_path, details, error_message, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, '', ?, ?)`,
+		job.ID, nullableInt64(job.MediaAssetID), job.MediaPath, job.FileName, job.Status, job.CurrentStage, job.Progress,
+		job.SourceLanguage, job.TargetLanguage, job.Provider, string(outputFormatsJSON), job.Details,
+		job.CreatedAt.Format(time.RFC3339), job.UpdatedAt.Format(time.RFC3339),
 	)
 	if err != nil {
 		return model.SubtitleJob{}, err
 	}
+	return job, nil
+}
+
+func (r *Repository) GetJob(ctx context.Context, id string) (model.SubtitleJob, error) {
+	var (
+		job               model.SubtitleJob
+		outputFormatsJSON string
+		mediaAssetID      sql.NullInt64
+		createdAtRaw      string
+		updatedAtRaw      string
+	)
+	row := r.db.QueryRowContext(ctx, `
+		SELECT id, media_asset_id, media_path, file_name, status, current_stage, progress,
+		       source_language, target_language, provider, output_formats_json,
+		       source_subtitle_path, output_subtitle_path, details, error_message, created_at, updated_at
+		FROM subtitle_jobs WHERE id = ?`, id)
+	if err := row.Scan(
+		&job.ID, &mediaAssetID, &job.MediaPath, &job.FileName, &job.Status, &job.CurrentStage, &job.Progress,
+		&job.SourceLanguage, &job.TargetLanguage, &job.Provider, &outputFormatsJSON,
+		&job.SourceSubtitlePath, &job.OutputSubtitlePath, &job.Details, &job.ErrorMessage, &createdAtRaw, &updatedAtRaw,
+	); err != nil {
+		return model.SubtitleJob{}, err
+	}
+	if mediaAssetID.Valid {
+		job.MediaAssetID = &mediaAssetID.Int64
+	}
+	if err := json.Unmarshal([]byte(outputFormatsJSON), &job.OutputFormats); err != nil {
+		return model.SubtitleJob{}, err
+	}
+	job.CreatedAt = parseTime(createdAtRaw)
+	job.UpdatedAt = parseTime(updatedAtRaw)
 	return job, nil
 }
 
@@ -344,8 +376,8 @@ func (r *Repository) ListJobs(ctx context.Context, limit int) ([]model.SubtitleJ
 	}
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, media_asset_id, media_path, file_name, status, current_stage, progress,
-		       source_language, target_language, provider, output_formats_json, details,
-		       created_at, updated_at
+		       source_language, target_language, provider, output_formats_json,
+		       source_subtitle_path, output_subtitle_path, details, error_message, created_at, updated_at
 		FROM subtitle_jobs
 		ORDER BY created_at DESC
 		LIMIT ?`, limit)
@@ -364,20 +396,9 @@ func (r *Repository) ListJobs(ctx context.Context, limit int) ([]model.SubtitleJ
 			updatedAtRaw      string
 		)
 		if err := rows.Scan(
-			&job.ID,
-			&mediaAssetID,
-			&job.MediaPath,
-			&job.FileName,
-			&job.Status,
-			&job.CurrentStage,
-			&job.Progress,
-			&job.SourceLanguage,
-			&job.TargetLanguage,
-			&job.Provider,
-			&outputFormatsJSON,
-			&job.Details,
-			&createdAtRaw,
-			&updatedAtRaw,
+			&job.ID, &mediaAssetID, &job.MediaPath, &job.FileName, &job.Status, &job.CurrentStage, &job.Progress,
+			&job.SourceLanguage, &job.TargetLanguage, &job.Provider, &outputFormatsJSON,
+			&job.SourceSubtitlePath, &job.OutputSubtitlePath, &job.Details, &job.ErrorMessage, &createdAtRaw, &updatedAtRaw,
 		); err != nil {
 			return nil, err
 		}
@@ -392,6 +413,47 @@ func (r *Repository) ListJobs(ctx context.Context, limit int) ([]model.SubtitleJ
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
+}
+
+func (r *Repository) ListPendingJobs(ctx context.Context) ([]model.SubtitleJob, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id FROM subtitle_jobs
+		WHERE status IN ('queued', 'running')
+		ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	jobs := make([]model.SubtitleJob, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		job, err := r.GetJob(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
+}
+
+func (r *Repository) UpdateJobProgress(ctx context.Context, id string, status string, stage string, progress int, details string, sourceSubtitlePath string, outputSubtitlePath string, errorMessage string) error {
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > 100 {
+		progress = 100
+	}
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE subtitle_jobs
+		SET status = ?, current_stage = ?, progress = ?, details = ?,
+		    source_subtitle_path = ?, output_subtitle_path = ?, error_message = ?, updated_at = ?
+		WHERE id = ?`,
+		status, stage, progress, details, sourceSubtitlePath, outputSubtitlePath, errorMessage, time.Now().UTC().Format(time.RFC3339), id,
+	)
+	return err
 }
 
 func (r *Repository) CountMediaAssets(ctx context.Context) (int, error) {
@@ -424,4 +486,3 @@ func parseTime(raw string) time.Time {
 	}
 	return parsed
 }
-

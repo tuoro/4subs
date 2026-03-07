@@ -1,6 +1,8 @@
-﻿package server
+package server
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/gayhub/4subs/internal/config"
 	"github.com/gayhub/4subs/internal/db"
+	"github.com/gayhub/4subs/internal/jobrunner"
 	"github.com/gayhub/4subs/internal/library"
 	"github.com/gayhub/4subs/internal/model"
 	"github.com/gayhub/4subs/internal/pipeline"
@@ -24,6 +27,7 @@ type Server struct {
 	cfg        config.Config
 	repo       *db.Repository
 	translator deepseek.Client
+	runner     *jobrunner.Runner
 }
 
 type createJobRequest struct {
@@ -37,14 +41,18 @@ type createJobRequest struct {
 }
 
 func New(cfg config.Config, repo *db.Repository) *Server {
+	translatorClient := deepseek.Client{
+		BaseURL: cfg.DeepSeekBaseURL,
+		APIKey:  cfg.DeepSeekAPIKey,
+		Model:   cfg.DeepSeekModel,
+	}
+	runner := jobrunner.New(cfg, repo, translatorClient)
+	runner.ResumePending(context.Background())
 	return &Server{
-		cfg:  cfg,
-		repo: repo,
-		translator: deepseek.Client{
-			BaseURL: cfg.DeepSeekBaseURL,
-			APIKey:  cfg.DeepSeekAPIKey,
-			Model:   cfg.DeepSeekModel,
-		},
+		cfg:        cfg,
+		repo:       repo,
+		translator: translatorClient,
+		runner:     runner,
 	}
 }
 
@@ -54,7 +62,7 @@ func (s *Server) Routes() http.Handler {
 	router.Use(middleware.RealIP)
 	router.Use(middleware.Logger)
 	router.Use(middleware.Recoverer)
-	router.Use(middleware.Timeout(60 * time.Second))
+	router.Use(middleware.Timeout(120 * time.Second))
 
 	router.Route("/api/v1", func(api chi.Router) {
 		api.Get("/health", s.handleHealth)
@@ -65,7 +73,10 @@ func (s *Server) Routes() http.Handler {
 		api.Get("/media", s.handleListMedia)
 		api.Post("/media/scan", s.handleScanMedia)
 		api.Get("/jobs", s.handleListJobs)
+		api.Get("/jobs/{id}", s.handleGetJob)
 		api.Post("/jobs", s.handleCreateJob)
+		api.Post("/jobs/{id}/retry", s.handleRetryJob)
+		api.Get("/jobs/{id}/download", s.handleDownloadJobResult)
 	})
 
 	staticDir := strings.TrimSpace(s.cfg.StaticDir)
@@ -94,8 +105,10 @@ func (s *Server) Routes() http.Handler {
 
 func (s *Server) handleHealth(writer http.ResponseWriter, request *http.Request) {
 	s.writeJSON(writer, http.StatusOK, map[string]any{
-		"status":    "ok",
-		"timestamp": time.Now().UTC(),
+		"status":               "ok",
+		"timestamp":            time.Now().UTC(),
+		"translation_ready":    s.translator.Ready(),
+		"subtitle_output_path": s.cfg.SubtitleOutputPath,
 	})
 }
 
@@ -121,9 +134,9 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	overview := model.Overview{
+	response := model.Overview{
 		AppName:          "4subs",
-		AppSummary:       "面向本地媒体的双语字幕生成平台，使用 Go 后端、PrimeVue 前端和 DeepSeek 翻译能力。",
+		AppSummary:       "当前版本已支持从外挂/内嵌文本字幕提取源字幕，通过 DeepSeek 翻译生成双语 SRT。",
 		TranslationReady: s.translator.Ready(),
 		MediaAssetCount:  mediaCount,
 		PendingJobCount:  pendingCount,
@@ -131,17 +144,18 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 		Pipeline:         pipeline.DefaultSteps(),
 		CurrentSettings:  settings,
 	}
-	s.writeJSON(writer, http.StatusOK, overview)
+	s.writeJSON(writer, http.StatusOK, response)
 }
 
 func (s *Server) handlePipeline(writer http.ResponseWriter, request *http.Request) {
 	s.writeJSON(writer, http.StatusOK, map[string]any{
 		"steps": pipeline.DefaultSteps(),
 		"runtime": map[string]any{
-			"ffmpeg_bin":          s.cfg.FFmpegBin,
-			"work_dir":            s.cfg.WorkDir,
-			"subtitle_output_dir": s.cfg.SubtitleOutputPath,
-			"translation_ready":   s.translator.Ready(),
+			"ffmpeg_bin":           s.cfg.FFmpegBin,
+			"work_dir":             s.cfg.WorkDir,
+			"subtitle_output_dir":  s.cfg.SubtitleOutputPath,
+			"translation_provider": s.cfg.TranslationProvider,
+			"translation_ready":    s.translator.Ready(),
 		},
 	})
 }
@@ -174,8 +188,7 @@ func (s *Server) handleSaveSettings(writer http.ResponseWriter, request *http.Re
 }
 
 func (s *Server) handleListMedia(writer http.ResponseWriter, request *http.Request) {
-	limit := parseLimit(request.URL.Query().Get("limit"), 200)
-	assets, err := s.repo.ListMediaAssets(request.Context(), limit)
+	assets, err := s.repo.ListMediaAssets(request.Context(), parseLimit(request.URL.Query().Get("limit"), 200))
 	if err != nil {
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
@@ -199,20 +212,29 @@ func (s *Server) handleScanMedia(writer http.ResponseWriter, request *http.Reque
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	s.writeJSON(writer, http.StatusOK, map[string]any{
-		"count": len(assets),
-		"items": assets,
-	})
+	s.writeJSON(writer, http.StatusOK, map[string]any{"count": len(assets), "items": assets})
 }
 
 func (s *Server) handleListJobs(writer http.ResponseWriter, request *http.Request) {
-	limit := parseLimit(request.URL.Query().Get("limit"), 100)
-	jobs, err := s.repo.ListJobs(request.Context(), limit)
+	jobs, err := s.repo.ListJobs(request.Context(), parseLimit(request.URL.Query().Get("limit"), 100))
 	if err != nil {
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
 	s.writeJSON(writer, http.StatusOK, map[string]any{"items": jobs})
+}
+
+func (s *Server) handleGetJob(writer http.ResponseWriter, request *http.Request) {
+	job, err := s.repo.GetJob(request.Context(), chi.URLParam(request, "id"))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			s.writeError(writer, http.StatusNotFound, fmt.Errorf("任务不存在"))
+			return
+		}
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, job)
 }
 
 func (s *Server) handleCreateJob(writer http.ResponseWriter, request *http.Request) {
@@ -226,19 +248,18 @@ func (s *Server) handleCreateJob(writer http.ResponseWriter, request *http.Reque
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	if strings.TrimSpace(payload.MediaPath) == "" && payload.MediaAssetID != nil {
-		assets, err := s.repo.ListMediaAssets(request.Context(), 500)
+	if payload.MediaAssetID != nil {
+		asset, err := s.repo.GetMediaAsset(request.Context(), *payload.MediaAssetID)
 		if err != nil {
+			if err == sql.ErrNoRows {
+				s.writeError(writer, http.StatusNotFound, fmt.Errorf("媒体不存在"))
+				return
+			}
 			s.writeError(writer, http.StatusInternalServerError, err)
 			return
 		}
-		for _, asset := range assets {
-			if asset.ID == *payload.MediaAssetID {
-				payload.MediaPath = asset.FilePath
-				payload.FileName = filepath.Base(asset.FilePath)
-				break
-			}
-		}
+		payload.MediaPath = asset.FilePath
+		payload.FileName = firstNonEmpty(payload.FileName, asset.RelativePath, filepath.Base(asset.FilePath))
 	}
 	job, err := s.repo.CreateJob(request.Context(), db.CreateJobInput{
 		MediaAssetID:   payload.MediaAssetID,
@@ -248,13 +269,60 @@ func (s *Server) handleCreateJob(writer http.ResponseWriter, request *http.Reque
 		TargetLanguage: firstNonEmpty(payload.TargetLanguage, settings.TargetLanguage),
 		Provider:       settings.TranslationProvider,
 		OutputFormats:  normalizeFormats(payload.OutputFormats, settings.OutputFormats),
-		Details:        firstNonEmpty(payload.Details, "任务已创建，等待后续接入完整字幕处理流水线。"),
+		Details:        firstNonEmpty(payload.Details, "任务已创建，等待后台提取字幕并翻译。"),
 	})
 	if err != nil {
 		s.writeError(writer, http.StatusBadRequest, err)
 		return
 	}
+	s.runner.Enqueue(job.ID)
 	s.writeJSON(writer, http.StatusCreated, job)
+}
+
+func (s *Server) handleRetryJob(writer http.ResponseWriter, request *http.Request) {
+	jobID := chi.URLParam(request, "id")
+	job, err := s.repo.GetJob(request.Context(), jobID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			s.writeError(writer, http.StatusNotFound, fmt.Errorf("任务不存在"))
+			return
+		}
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.repo.UpdateJobProgress(request.Context(), job.ID, "queued", "queued", 0, "任务已重新排队", job.SourceSubtitlePath, job.OutputSubtitlePath, ""); err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	s.runner.Enqueue(job.ID)
+	fresh, err := s.repo.GetJob(request.Context(), job.ID)
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, fresh)
+}
+
+func (s *Server) handleDownloadJobResult(writer http.ResponseWriter, request *http.Request) {
+	job, err := s.repo.GetJob(request.Context(), chi.URLParam(request, "id"))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			s.writeError(writer, http.StatusNotFound, fmt.Errorf("任务不存在"))
+			return
+		}
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	if strings.TrimSpace(job.OutputSubtitlePath) == "" {
+		s.writeError(writer, http.StatusNotFound, fmt.Errorf("任务尚未生成输出字幕"))
+		return
+	}
+	if _, err := os.Stat(job.OutputSubtitlePath); err != nil {
+		s.writeError(writer, http.StatusNotFound, fmt.Errorf("输出字幕文件不存在"))
+		return
+	}
+	writer.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(job.OutputSubtitlePath)))
+	http.ServeFile(writer, request, job.OutputSubtitlePath)
 }
 
 func (s *Server) writeJSON(writer http.ResponseWriter, status int, payload any) {
@@ -268,9 +336,7 @@ func (s *Server) writeError(writer http.ResponseWriter, status int, err error) {
 	if err != nil {
 		message = err.Error()
 	}
-	s.writeJSON(writer, status, map[string]any{
-		"error": message,
-	})
+	s.writeJSON(writer, status, map[string]any{"error": message})
 }
 
 func normalizeSettings(settings model.AppSettings) model.AppSettings {
@@ -281,8 +347,9 @@ func normalizeSettings(settings model.AppSettings) model.AppSettings {
 	settings.BilingualLayout = firstNonEmpty(settings.BilingualLayout, "origin_above")
 	settings.TranslationProvider = firstNonEmpty(settings.TranslationProvider, "deepseek")
 	settings.TranslationModel = firstNonEmpty(settings.TranslationModel, "deepseek-chat")
+	settings.TranslationPrompt = firstNonEmpty(settings.TranslationPrompt, "请逐条翻译字幕文本，只输出目标语言译文，不要解释，不要合并或拆分字幕。")
 	if settings.MaxSubtitlePerBatch <= 0 {
-		settings.MaxSubtitlePerBatch = 30
+		settings.MaxSubtitlePerBatch = 20
 	}
 	return settings
 }
@@ -303,7 +370,7 @@ func normalizeFormats(values []string, fallback []string) []string {
 	seen := map[string]struct{}{}
 	for _, value := range values {
 		trimmed := strings.ToLower(strings.TrimSpace(value))
-		if trimmed == "" {
+		if trimmed == "" || trimmed != "srt" {
 			continue
 		}
 		if _, ok := seen[trimmed]; ok {
@@ -338,4 +405,3 @@ func parseLimit(raw string, fallback int) int {
 	}
 	return limit
 }
-

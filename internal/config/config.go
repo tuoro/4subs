@@ -1,4 +1,4 @@
-﻿package config
+package config
 
 import (
 	"errors"
@@ -79,4 +79,3 @@ func envOrDefault(key, fallback string) string {
 	}
 	return value
 }
-

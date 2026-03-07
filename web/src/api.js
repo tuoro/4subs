@@ -51,6 +51,10 @@ export function listJobs(limit = 100) {
   return apiRequest(`/api/v1/jobs?limit=${limit}`)
 }
 
+export function getJob(id) {
+  return apiRequest(`/api/v1/jobs/${id}`)
+}
+
 export function createJob(payload) {
   return apiRequest('/api/v1/jobs', {
     method: 'POST',
@@ -58,3 +62,12 @@ export function createJob(payload) {
   })
 }
 
+export function retryJob(id) {
+  return apiRequest(`/api/v1/jobs/${id}/retry`, {
+    method: 'POST'
+  })
+}
+
+export function getJobDownloadURL(id) {
+  return `/api/v1/jobs/${id}/download`
+}

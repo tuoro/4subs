@@ -1,22 +1,22 @@
 ﻿# 4subs
 
-`4subs` 现已重置为一个全新的双语字幕生成项目骨架：
+`4subs` 现在是一套面向本地媒体的双语字幕生成工具：
 
-- 后端继续使用 `Go`
-- 前端继续使用 `Vue 3 + PrimeVue`
-- 服务形态继续保持 `Docker` 优先
-- 目标工作流聚焦“本地媒体 -> 音频提取 -> 原文识别 -> DeepSeek 翻译 -> 双语字幕导出”
+- 后端：`Go`
+- 前端：`Vue 3 + PrimeVue`
+- 部署：`Docker` 优先
+- 翻译：`DeepSeek API`
 
-## 当前重构结果
+## 当前已实现
 
-这次已经完成旧字幕下载模块清理，并重建了以下核心骨架：
+这一版已经不再是旧的字幕下载聚合器，而是新的处理链路：
 
-- 新的 Go API 服务
-- 新的 SQLite 数据结构
-- 新的 PrimeVue 工作台界面
-- 新的媒体扫描、任务创建、设置管理接口
-- 新的 Docker 镜像打包基础
-- 新的 GitHub Actions 镜像构建工作流
+1. 扫描本地媒体目录
+2. 创建字幕翻译任务
+3. 提取同名外挂字幕，或尝试抽取视频内嵌文本字幕轨
+4. 解析为标准 `SRT` 字幕块
+5. 按批次调用 `DeepSeek Chat Completions` 翻译
+6. 生成双语 `SRT` 到输出目录
 
 ## 当前 API
 
@@ -28,18 +28,41 @@
 - `GET /api/v1/media`
 - `POST /api/v1/media/scan`
 - `GET /api/v1/jobs`
+- `GET /api/v1/jobs/{id}`
 - `POST /api/v1/jobs`
+- `POST /api/v1/jobs/{id}/retry`
+- `GET /api/v1/jobs/{id}/download`
+
+## 关键能力边界
+
+当前版本已支持：
+
+- 同名外挂字幕提取（`.srt`、`.ass`、`.ssa`、`.vtt`）
+- 视频内嵌文本字幕轨提取
+- DeepSeek 批量翻译
+- 双语 `SRT` 输出
+
+当前版本暂未支持：
+
+- 纯音频 `ASR` 识别
+- 图片字幕 `OCR`
+- `ASS` 样式导出
+- 人工逐条校对工作台
+
+如果视频既没有外挂字幕，也没有可提取的内嵌文本字幕轨，任务会失败并提示“当前版本尚未接入 ASR”。
 
 ## 新目录职责
 
 - `cmd/server`：服务启动入口
 - `internal/config`：环境变量与目录配置
-- `internal/db`：SQLite 持久化与默认数据
+- `internal/db`：SQLite 持久化、任务状态与设置存储
 - `internal/library`：本地媒体扫描
-- `internal/pipeline`：字幕处理流水线定义
-- `internal/translator`：翻译适配层抽象
+- `internal/media`：字幕源提取与结果落盘
+- `internal/subtitle`：SRT 解析与双语渲染
+- `internal/jobrunner`：后台任务执行器
+- `internal/translator/deepseek`：DeepSeek 翻译接入
 - `internal/server`：HTTP API 与静态页面托管
-- `web/src/views`：PrimeVue 管理界面
+- `web/src/views`：PrimeVue 工作台页面
 
 ## Docker 启动
 
@@ -82,33 +105,21 @@ docker compose up -d --build
 ghcr.io/<owner>/<repo>
 ```
 
-## 当前状态说明
+## 本地验证结果
 
-当前版本已经是“新项目骨架”，不是旧项目小修小补。
+我已经完成：
 
-已实现：
+- `go build -buildvcs=false ./cmd/server`
+- `npm install`
+- `npm run build`
 
-- 本地媒体扫描
-- 任务创建与任务列表
-- 设置持久化
-- PrimeVue 新工作台
-- DeepSeek 配置入口
-
-尚未实现：
-
-- 实际音频提取执行器
-- 实际 ASR 识别接入
-- 实际 DeepSeek 翻译调用
-- 双语 SRT/ASS 渲染
-- 任务后台执行与进度推进
+说明：当前环境没有 `docker` 命令，所以我没有实际执行本地镜像构建，但 GitHub Actions 工作流已经就位。
 
 ## 下一步建议
 
-建议接下来按这个顺序继续：
+最值得继续做的功能顺序：
 
-1. 增加任务执行器
-2. 接入 ASR 适配层
-3. 接入 DeepSeek 翻译实现
-4. 生成双语 `SRT`
-5. 增加字幕预览与人工校对
-
+1. 接入 `ASR`，覆盖“无源字幕”视频
+2. 增加任务并发控制和取消能力
+3. 增加字幕预览与人工修订
+4. 增加 `ASS` 导出

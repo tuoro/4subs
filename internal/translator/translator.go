@@ -1,4 +1,4 @@
-﻿package translator
+package translator
 
 type Segment struct {
 	Index      int    `json:"index"`
@@ -9,4 +9,3 @@ type Provider interface {
 	Name() string
 	Ready() bool
 }
-

@@ -1,4 +1,4 @@
-﻿package library
+package library
 
 import (
 	"io/fs"
@@ -70,4 +70,3 @@ func ScanMediaPaths(paths []string) ([]model.MediaAsset, error) {
 	})
 	return assets, nil
 }
-
