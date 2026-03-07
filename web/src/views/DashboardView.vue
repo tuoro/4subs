@@ -1,219 +1,174 @@
-<template>
-  <section>
-    <div class="page-header">
-      <h1>Dashboard</h1>
-      <Button label="Run Scan" icon="pi pi-search" :loading="scanning" @click="runScan" />
+﻿<template>
+  <section class="page-grid">
+    <div class="span-12">
+      <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
+      <Message v-else severity="info" :closable="false">
+        当前版本已经完成旧模块清理，正在围绕“本地媒体 + DeepSeek 翻译 + 双语字幕导出”重建产品骨架。
+      </Message>
     </div>
 
-    <Card>
-      <template #title>Service Status</template>
+    <div class="span-12">
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="label">媒体素材数</div>
+          <div class="value">{{ overview?.media_asset_count ?? 0 }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">待处理任务</div>
+          <div class="value">{{ overview?.pending_job_count ?? 0 }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">翻译能力状态</div>
+          <div class="value">{{ overview?.translation_ready ? '已配置' : '待配置' }}</div>
+        </div>
+      </div>
+    </div>
+
+    <Card class="span-8">
+      <template #title>
+        <div class="card-title-row">
+          <h2>媒体库</h2>
+          <div class="action-row">
+            <Button label="刷新总览" icon="pi pi-refresh" severity="secondary" @click="loadAll" />
+            <Button label="扫描媒体目录" icon="pi pi-search" @click="handleScan" :loading="scanning" />
+          </div>
+        </div>
+      </template>
       <template #content>
-        <div class="status-grid">
-          <div>
-            <div class="muted">Health</div>
-            <Tag :value="health.status || 'unknown'" :severity="health.status === 'ok' ? 'success' : 'warn'" />
-          </div>
-          <div>
-            <div class="muted">Version</div>
-            <div>{{ health.version || '-' }}</div>
-          </div>
-          <div>
-            <div class="muted">Mode</div>
-            <div>{{ health.runtime_mode || '-' }}</div>
-          </div>
-          <div>
-            <div class="muted">Missing subtitles</div>
-            <div>{{ missingCount }}</div>
+        <p class="card-subtle">直接扫描你挂载到容器的本地视频目录，后续将在这里为每个素材创建字幕任务。</p>
+        <DataTable :value="mediaItems" stripedRows paginator :rows="6">
+          <Column field="title" header="标题" />
+          <Column field="relative_path" header="相对路径" />
+          <Column field="file_size" header="大小">
+            <template #body="slotProps">{{ formatSize(slotProps.data.file_size) }}</template>
+          </Column>
+          <Column field="status" header="状态">
+            <template #body="slotProps">
+              <Tag :value="slotProps.data.status" severity="success" />
+            </template>
+          </Column>
+          <Column header="操作">
+            <template #body="slotProps">
+              <Button label="创建任务" size="small" @click="handleCreateJob(slotProps.data)" />
+            </template>
+          </Column>
+        </DataTable>
+        <div class="table-note">如果媒体表为空，请先到设置页确认媒体目录，再回来执行扫描。</div>
+      </template>
+    </Card>
+
+    <Card class="span-4">
+      <template #title>
+        <div class="card-title-row">
+          <h2>处理流水线</h2>
+          <RouterLink to="/pipeline" class="nav-link">查看详情</RouterLink>
+        </div>
+      </template>
+      <template #content>
+        <div class="pipeline-list">
+          <div v-for="step in overview?.pipeline || []" :key="step.key" class="pipeline-item">
+            <div class="card-title-row">
+              <h3>{{ step.title }}</h3>
+              <Tag :value="step.owner" severity="contrast" />
+            </div>
+            <p>{{ step.description }}</p>
           </div>
         </div>
       </template>
     </Card>
 
-    <Card class="mt-16">
-      <template #title>Recent Jobs</template>
+    <Card class="span-12">
+      <template #title>
+        <div class="card-title-row">
+          <h2>最近任务</h2>
+        </div>
+      </template>
       <template #content>
-        <DataTable :value="jobs" stripedRows>
-          <Column field="id" header="ID" />
-          <Column field="type" header="Type" />
-          <Column field="status" header="Status">
+        <DataTable :value="jobs" stripedRows paginator :rows="6">
+          <Column field="file_name" header="文件名" />
+          <Column field="status" header="状态">
             <template #body="slotProps">
-              <Tag :value="slotProps.data.status" :severity="tagSeverity(slotProps.data.status)" />
+              <Tag :value="slotProps.data.status" :severity="slotProps.data.status === 'queued' ? 'warn' : 'info'" />
             </template>
           </Column>
-          <Column field="details" header="Details" />
-          <Column field="updated_at" header="Updated" />
+          <Column field="current_stage" header="当前阶段" />
+          <Column field="provider" header="翻译提供方" />
+          <Column field="target_language" header="目标语言" />
+          <Column field="details" header="说明" />
         </DataTable>
       </template>
     </Card>
-
-    <Card class="mt-16">
-      <template #title>Media Missing Subtitles</template>
-      <template #content>
-        <DataTable :value="missingMedia" stripedRows>
-          <Column field="title" header="Title" />
-          <Column field="media_type" header="Type" />
-          <Column header="Season/Episode">
-            <template #body="slotProps">
-              {{ seasonEpisode(slotProps.data) }}
-            </template>
-          </Column>
-          <Column field="file_path" header="Path" />
-          <Column header="Actions">
-            <template #body="slotProps">
-              <Button
-                size="small"
-                label="Search"
-                icon="pi pi-cloud-download"
-                :loading="searchingMediaId === slotProps.data.id"
-                @click="searchCandidates(slotProps.data)"
-              />
-            </template>
-          </Column>
-        </DataTable>
-      </template>
-    </Card>
-
-    <Dialog v-model:visible="candidateDialogVisible" modal :style="{ width: '70rem' }" :header="candidateDialogTitle">
-      <DataTable :value="currentCandidates" stripedRows>
-        <Column field="provider_name" header="Provider" />
-        <Column field="title" header="Title" />
-        <Column field="release_name" header="Release" />
-        <Column field="language_text" header="Language" />
-        <Column field="score" header="Score" />
-        <Column field="details" header="Details" />
-        <Column header="Download">
-          <template #body="slotProps">
-            <Button
-              size="small"
-              icon="pi pi-download"
-              label="Download"
-              :loading="downloadingCandidateId === slotProps.data.id"
-              @click="downloadSelectedCandidate(slotProps.data)"
-            />
-          </template>
-        </Column>
-      </DataTable>
-      <div v-if="Object.keys(candidateErrors).length > 0" class="mt-16">
-        <h4>Provider Errors</h4>
-        <div v-for="(err, provider) in candidateErrors" :key="provider" class="muted">{{ provider }}: {{ err }}</div>
-      </div>
-    </Dialog>
-
-    <Toast />
   </section>
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount, ref } from 'vue'
-import { useToast } from 'primevue/usetoast'
+import { onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 import Button from 'primevue/button'
 import Card from 'primevue/card'
-import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
+import DataTable from 'primevue/datatable'
+import Message from 'primevue/message'
 import Tag from 'primevue/tag'
-import Dialog from 'primevue/dialog'
-import Toast from 'primevue/toast'
+import { createJob, getOverview, listJobs, listMedia, scanMedia } from '../api'
 
-import { downloadCandidate, getHealth, getJobs, getMedia, getMediaCandidates, searchMediaSubtitles, triggerScan } from '../api'
-
-const toast = useToast()
-const health = ref({})
+const overview = ref(null)
+const mediaItems = ref([])
 const jobs = ref([])
-const missingMedia = ref([])
-const missingCount = ref(0)
+const errorMessage = ref('')
 const scanning = ref(false)
-const searchingMediaId = ref(null)
-const downloadingCandidateId = ref(null)
 
-const candidateDialogVisible = ref(false)
-const candidateDialogTitle = ref('Subtitle Candidates')
-const currentCandidates = ref([])
-const candidateErrors = ref({})
-
-let eventSource
-
-const tagSeverity = (status) => {
-  if (status === 'completed') return 'success'
-  if (status === 'running') return 'info'
-  if (status === 'failed') return 'danger'
-  return 'secondary'
-}
-
-const seasonEpisode = (row) => {
-  if (row.media_type !== 'episode') return '-'
-  const season = row.season ?? '?'
-  const episode = row.episode ?? '?'
-  return `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
-}
-
-const loadData = async () => {
-  const [healthRes, jobsRes, mediaRes] = await Promise.all([
-    getHealth(),
-    getJobs(),
-    getMedia({ missingOnly: true, limit: 500 })
-  ])
-  health.value = healthRes
-  jobs.value = jobsRes
-  missingMedia.value = mediaRes
-  missingCount.value = mediaRes.length
-}
-
-const runScan = async () => {
-  scanning.value = true
+async function loadAll() {
   try {
-    await triggerScan()
-    await loadData()
+    errorMessage.value = ''
+    overview.value = await getOverview()
+    mediaItems.value = (await listMedia()).items || []
+    jobs.value = (await listJobs()).items || []
+  } catch (error) {
+    errorMessage.value = error.message
+  }
+}
+
+async function handleScan() {
+  try {
+    scanning.value = true
+    await scanMedia()
+    await loadAll()
+  } catch (error) {
+    errorMessage.value = error.message
   } finally {
     scanning.value = false
   }
 }
 
-const searchCandidates = async (media) => {
-  searchingMediaId.value = media.id
-  candidateDialogTitle.value = `Candidates: ${media.title}`
-  candidateErrors.value = {}
+async function handleCreateJob(item) {
   try {
-    const result = await searchMediaSubtitles(media.id)
-    currentCandidates.value = await getMediaCandidates(media.id, 100)
-    candidateErrors.value = result.errors || {}
-    candidateDialogVisible.value = true
-    toast.add({ severity: 'success', summary: 'Search completed', detail: `Found ${result.count || 0} candidates`, life: 2500 })
-  } catch (error) {
-    toast.add({ severity: 'error', summary: 'Search failed', detail: error.message, life: 3000 })
-  } finally {
-    searchingMediaId.value = null
-  }
-}
-
-const downloadSelectedCandidate = async (candidate) => {
-  downloadingCandidateId.value = candidate.id
-  try {
-    const result = await downloadCandidate(candidate.id)
-    toast.add({
-      severity: 'success',
-      summary: 'Subtitle downloaded',
-      detail: result.file_path || 'Saved',
-      life: 3500
+    await createJob({
+      media_asset_id: item.id,
+      media_path: item.file_path,
+      file_name: item.relative_path,
+      output_formats: ['srt']
     })
-    await loadData()
+    await loadAll()
   } catch (error) {
-    toast.add({ severity: 'error', summary: 'Download failed', detail: error.message, life: 3500 })
-  } finally {
-    downloadingCandidateId.value = null
+    errorMessage.value = error.message
   }
 }
 
-onMounted(async () => {
-  await loadData()
-  eventSource = new EventSource('/api/v1/events')
-  eventSource.onmessage = async () => {
-    await loadData()
+function formatSize(size) {
+  if (!size) {
+    return '0 B'
   }
-})
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = size
+  let index = 0
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024
+    index += 1
+  }
+  return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
+}
 
-onBeforeUnmount(() => {
-  if (eventSource) {
-    eventSource.close()
-  }
-})
+onMounted(loadAll)
 </script>
+

@@ -1,61 +1,63 @@
-package model
+﻿package model
 
 import "time"
 
-type Settings struct {
-	LanguagePriority    []string `json:"language_priority"`
-	AutoReplaceExisting bool     `json:"auto_replace_existing"`
-	SubtitleOutputPath  string   `json:"subtitle_output_path"`
+type AppSettings struct {
+	MediaPaths           []string  `json:"media_paths"`
+	SourceLanguage       string    `json:"source_language"`
+	TargetLanguage       string    `json:"target_language"`
+	BilingualLayout      string    `json:"bilingual_layout"`
+	OutputFormats        []string  `json:"output_formats"`
+	TranslationProvider  string    `json:"translation_provider"`
+	TranslationModel     string    `json:"translation_model"`
+	TranslationPrompt    string    `json:"translation_prompt"`
+	MaxSubtitlePerBatch  int       `json:"max_subtitle_per_batch"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
-type ProviderStatus struct {
-	Name           string `json:"name"`
-	DisplayName    string `json:"display_name"`
-	Configured     bool   `json:"configured"`
-	Enabled        bool   `json:"enabled"`
-	SupportsSearch bool   `json:"supports_search"`
-	SupportsDL     bool   `json:"supports_download"`
-	Note           string `json:"note,omitempty"`
+type MediaAsset struct {
+	ID           int64     `json:"id"`
+	Title        string    `json:"title"`
+	RootPath     string    `json:"root_path"`
+	RelativePath string    `json:"relative_path"`
+	FilePath     string    `json:"file_path"`
+	FileSize     int64     `json:"file_size"`
+	Status       string    `json:"status"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-type Job struct {
-	ID        string    `json:"id"`
-	Type      string    `json:"type"`
-	Status    string    `json:"status"`
-	Details   string    `json:"details,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	Retries   int       `json:"retries"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+type SubtitleJob struct {
+	ID             string    `json:"id"`
+	MediaAssetID   *int64    `json:"media_asset_id,omitempty"`
+	MediaPath      string    `json:"media_path"`
+	FileName       string    `json:"file_name"`
+	Status         string    `json:"status"`
+	CurrentStage   string    `json:"current_stage"`
+	Progress       int       `json:"progress"`
+	SourceLanguage string    `json:"source_language"`
+	TargetLanguage string    `json:"target_language"`
+	Provider       string    `json:"provider"`
+	OutputFormats  []string  `json:"output_formats"`
+	Details        string    `json:"details,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-type MediaItem struct {
-	ID          int64      `json:"id"`
-	MediaType   string     `json:"media_type"`
-	Title       string     `json:"title"`
-	Year        *int       `json:"year,omitempty"`
-	Season      *int       `json:"season,omitempty"`
-	Episode     *int       `json:"episode,omitempty"`
-	FilePath    string     `json:"file_path"`
-	MediaHash   string     `json:"media_hash,omitempty"`
-	HasSubtitle bool       `json:"has_subtitle"`
-	CreatedAt   *time.Time `json:"created_at,omitempty"`
-	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+type PipelineStep struct {
+	Key         string `json:"key"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Owner       string `json:"owner"`
 }
 
-type SubtitleCandidate struct {
-	ID           int64      `json:"id"`
-	MediaItemID  int64      `json:"media_item_id"`
-	ProviderName string     `json:"provider_name"`
-	CandidateID  string     `json:"candidate_id"`
-	Title        string     `json:"title"`
-	ReleaseName  string     `json:"release_name,omitempty"`
-	Language     string     `json:"language,omitempty"`
-	LanguageText string     `json:"language_text,omitempty"`
-	Score        float64    `json:"score"`
-	DownloadURL  string     `json:"download_url,omitempty"`
-	Details      string     `json:"details,omitempty"`
-	RawPayload   string     `json:"raw_payload,omitempty"`
-	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
-	CreatedAt    *time.Time `json:"created_at,omitempty"`
+type Overview struct {
+	AppName            string         `json:"app_name"`
+	AppSummary         string         `json:"app_summary"`
+	TranslationReady   bool           `json:"translation_ready"`
+	MediaAssetCount    int            `json:"media_asset_count"`
+	PendingJobCount    int            `json:"pending_job_count"`
+	RecentJobs         []SubtitleJob  `json:"recent_jobs"`
+	Pipeline           []PipelineStep `json:"pipeline"`
+	CurrentSettings    AppSettings    `json:"current_settings"`
 }
+

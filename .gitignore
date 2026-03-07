@@ -1,8 +1,9 @@
-# Go
+﻿# Go
 /bin/
 *.exe
 *.test
 *.out
+.tmp/
 
 # Local runtime data
 /deploy/data/*
@@ -11,6 +12,8 @@
 !/deploy/config/.gitkeep
 /deploy/subtitles/*
 !/deploy/subtitles/.gitkeep
+/deploy/work/*
+!/deploy/work/.gitkeep
 /media/*
 !/media/.gitkeep
 
@@ -24,3 +27,4 @@ web/dist/
 # OS/editor
 .DS_Store
 Thumbs.db
+

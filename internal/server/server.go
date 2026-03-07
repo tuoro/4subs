@@ -1,793 +1,341 @@
-package server
+﻿package server
 
 import (
-	"archive/zip"
-	"bytes"
-	"compress/gzip"
-	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/sha256"
-	"database/sql"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gayhub/4subs/internal/config"
 	"github.com/gayhub/4subs/internal/db"
+	"github.com/gayhub/4subs/internal/library"
 	"github.com/gayhub/4subs/internal/model"
-	"github.com/gayhub/4subs/internal/provider"
-	"github.com/gayhub/4subs/internal/provider/assrt"
-	"github.com/gayhub/4subs/internal/provider/opensubtitles"
-	"github.com/gayhub/4subs/internal/scanner"
+	"github.com/gayhub/4subs/internal/pipeline"
+	"github.com/gayhub/4subs/internal/translator/deepseek"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
 
 type Server struct {
-	cfg    config.Config
-	repo   *db.Repository
-	events *EventBus
+	cfg        config.Config
+	repo       *db.Repository
+	translator deepseek.Client
+}
+
+type createJobRequest struct {
+	MediaAssetID   *int64   `json:"media_asset_id"`
+	MediaPath      string   `json:"media_path"`
+	FileName       string   `json:"file_name"`
+	SourceLanguage string   `json:"source_language"`
+	TargetLanguage string   `json:"target_language"`
+	OutputFormats  []string `json:"output_formats"`
+	Details        string   `json:"details"`
 }
 
 func New(cfg config.Config, repo *db.Repository) *Server {
 	return &Server{
-		cfg:    cfg,
-		repo:   repo,
-		events: NewEventBus(),
+		cfg:  cfg,
+		repo: repo,
+		translator: deepseek.Client{
+			BaseURL: cfg.DeepSeekBaseURL,
+			APIKey:  cfg.DeepSeekAPIKey,
+			Model:   cfg.DeepSeekModel,
+		},
 	}
 }
 
 func (s *Server) Routes() http.Handler {
-	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
+	router := chi.NewRouter()
+	router.Use(middleware.RequestID)
+	router.Use(middleware.RealIP)
+	router.Use(middleware.Logger)
+	router.Use(middleware.Recoverer)
+	router.Use(middleware.Timeout(60 * time.Second))
 
-	r.Route("/api/v1", func(api chi.Router) {
+	router.Route("/api/v1", func(api chi.Router) {
 		api.Get("/health", s.handleHealth)
+		api.Get("/overview", s.handleOverview)
+		api.Get("/pipeline", s.handlePipeline)
 		api.Get("/settings", s.handleGetSettings)
-		api.Put("/settings", s.handleUpdateSettings)
-		api.Get("/providers", s.handleListProviders)
-		api.Put("/providers/{name}/credential", s.handleSaveCredential)
-		api.Get("/jobs", s.handleJobs)
-		api.Post("/scan", s.handleScan)
-		api.Get("/events", s.handleEvents)
-		api.Get("/media", s.handleMedia)
-		api.Post("/media/{id}/search-subtitles", s.handleSearchSubtitles)
-		api.Get("/media/{id}/candidates", s.handleMediaCandidates)
-		api.Post("/candidates/{id}/download", s.handleDownloadCandidate)
+		api.Put("/settings", s.handleSaveSettings)
+		api.Get("/media", s.handleListMedia)
+		api.Post("/media/scan", s.handleScanMedia)
+		api.Get("/jobs", s.handleListJobs)
+		api.Post("/jobs", s.handleCreateJob)
 	})
 
-	// Serve built PrimeVue app if present.
-	r.Handle("/*", s.staticHandler())
-	return r
-}
-
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":       "ok",
-		"service":      "4subs",
-		"version":      "0.1.0",
-		"time":         time.Now().UTC().Format(time.RFC3339),
-		"storage":      "sqlite",
-		"runtime_mode": "docker-first",
-	})
-}
-
-func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
-	settings, err := s.repo.GetSettings(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, settings)
-}
-
-func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
-	var payload model.Settings
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("decode request: %w", err))
-		return
-	}
-	if len(payload.LanguagePriority) == 0 {
-		writeError(w, http.StatusBadRequest, errors.New("language_priority cannot be empty"))
-		return
-	}
-	if strings.TrimSpace(payload.SubtitleOutputPath) == "" {
-		writeError(w, http.StatusBadRequest, errors.New("subtitle_output_path cannot be empty"))
-		return
+	staticDir := strings.TrimSpace(s.cfg.StaticDir)
+	if staticDir == "" {
+		return router
 	}
 
-	if err := s.repo.UpdateSettings(r.Context(), payload); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	s.events.Publish("settings.updated", payload)
-	writeJSON(w, http.StatusOK, payload)
-}
-
-func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
-	providers, err := s.repo.ListProviders(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, providers)
-}
-
-func (s *Server) handleSaveCredential(w http.ResponseWriter, r *http.Request) {
-	name := strings.ToLower(strings.TrimSpace(chi.URLParam(r, "name")))
-	if name != "assrt" && name != "opensubtitles" {
-		writeError(w, http.StatusBadRequest, errors.New("provider must be assrt or opensubtitles"))
-		return
-	}
-
-	var payload map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("decode request: %w", err))
-		return
-	}
-
-	trimmed := make(map[string]string, len(payload))
-	for k, v := range payload {
-		if strings.TrimSpace(v) == "" {
-			continue
-		}
-		trimmed[k] = strings.TrimSpace(v)
-	}
-	if len(trimmed) == 0 {
-		writeError(w, http.StatusBadRequest, errors.New("no non-empty credential fields provided"))
-		return
-	}
-
-	blob, err := json.Marshal(trimmed)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	encrypted, err := encrypt(blob, s.cfg.AppSecret)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if err := s.repo.SaveProviderCredential(r.Context(), name, encrypted); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	s.events.Publish("provider.credential_saved", map[string]string{"provider": name})
-	writeJSON(w, http.StatusOK, map[string]any{"provider": name, "configured": true})
-}
-
-func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
-	limit := 50
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err == nil && parsed > 0 && parsed <= 500 {
-			limit = parsed
-		}
-	}
-	jobs, err := s.repo.ListJobs(r.Context(), limit)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, jobs)
-}
-
-func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
-	job, err := s.repo.CreateJob(r.Context(), "scan", "Scan media library for missing subtitles")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	s.events.Publish("job.created", job)
-
-	go s.runScanJob(job.ID)
-	writeJSON(w, http.StatusAccepted, job)
-}
-
-func (s *Server) runScanJob(jobID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	_ = s.repo.UpdateJob(ctx, jobID, "running", "", "")
-	s.events.Publish("job.updated", map[string]string{"id": jobID, "status": "running"})
-	scanResult, err := scanner.Run(s.cfg.MediaPaths)
-	if err != nil {
-		_ = s.repo.UpdateJob(ctx, jobID, "failed", "", err.Error())
-		s.events.Publish("job.updated", map[string]string{"id": jobID, "status": "failed", "error": err.Error()})
-		return
-	}
-
-	inserted, updated, err := s.repo.UpsertMediaItems(ctx, scanResult.Items)
-	if err != nil {
-		_ = s.repo.UpdateJob(ctx, jobID, "failed", "", err.Error())
-		s.events.Publish("job.updated", map[string]string{"id": jobID, "status": "failed", "error": err.Error()})
-		return
-	}
-
-	details := fmt.Sprintf(
-		"Scanned %d video files, missing subtitles %d, inserted %d, updated %d",
-		scanResult.ScannedVideoFiles,
-		scanResult.MissingSubtitleFiles,
-		inserted,
-		updated,
-	)
-	_ = s.repo.UpdateJob(ctx, jobID, "completed", details, "")
-	s.events.Publish("job.updated", map[string]any{
-		"id":                  jobID,
-		"status":              "completed",
-		"scanned_video":       scanResult.ScannedVideoFiles,
-		"missing_subtitles":   scanResult.MissingSubtitleFiles,
-		"inserted_or_updated": inserted + updated,
-	})
-}
-
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, errors.New("streaming unsupported"))
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
-	stream := s.events.Subscribe()
-	defer s.events.Unsubscribe(stream)
-
-	heartbeat := time.NewTicker(15 * time.Second)
-	defer heartbeat.Stop()
-
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case msg := <-stream:
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", msg)
-			flusher.Flush()
-		case <-heartbeat.C:
-			_, _ = io.WriteString(w, ": heartbeat\n\n")
-			flusher.Flush()
-		}
-	}
-}
-
-func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
-	missingOnly := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("missing_sub")), "true")
-	limit := 200
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 1000 {
-			limit = parsed
-		}
-	}
-
-	items, err := s.repo.ListMedia(r.Context(), missingOnly, limit)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, items)
-}
-
-func (s *Server) handleSearchSubtitles(w http.ResponseWriter, r *http.Request) {
-	mediaID, err := strconv.ParseInt(strings.TrimSpace(chi.URLParam(r, "id")), 10, 64)
-	if err != nil || mediaID <= 0 {
-		writeError(w, http.StatusBadRequest, errors.New("invalid media id"))
-		return
-	}
-
-	mediaItem, err := s.repo.GetMediaByID(r.Context(), mediaID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, errors.New("media not found"))
+	fileServer := http.FileServer(http.Dir(staticDir))
+	router.Handle("/assets/*", fileServer)
+	router.Get("/*", func(writer http.ResponseWriter, request *http.Request) {
+		requestPath := strings.TrimPrefix(request.URL.Path, "/")
+		if requestPath == "" {
+			http.ServeFile(writer, request, filepath.Join(staticDir, "index.html"))
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+		targetPath := filepath.Join(staticDir, filepath.FromSlash(requestPath))
+		if info, err := os.Stat(targetPath); err == nil && !info.IsDir() {
+			fileServer.ServeHTTP(writer, request)
+			return
+		}
+		http.ServeFile(writer, request, filepath.Join(staticDir, "index.html"))
+	})
 
-	settings, err := s.repo.GetSettings(r.Context())
+	return router
+}
+
+func (s *Server) handleHealth(writer http.ResponseWriter, request *http.Request) {
+	s.writeJSON(writer, http.StatusOK, map[string]any{
+		"status":    "ok",
+		"timestamp": time.Now().UTC(),
+	})
+}
+
+func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Request) {
+	ctx := request.Context()
+	settings, err := s.repo.GetSettings(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-
-	input := provider.SearchInput{
-		MediaID:   mediaItem.ID,
-		Title:     mediaItem.Title,
-		MediaType: mediaItem.MediaType,
-		Year:      mediaItem.Year,
-		Season:    mediaItem.Season,
-		Episode:   mediaItem.Episode,
-		FilePath:  mediaItem.FilePath,
-		Limit:     20,
+	mediaCount, err := s.repo.CountMediaAssets(ctx)
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
 	}
-
-	type providerResult struct {
-		Name       string
-		Candidates []model.SubtitleCandidate
-		Err        error
+	pendingCount, err := s.repo.CountPendingJobs(ctx)
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
 	}
-	results := make([]providerResult, 0, 2)
-	resultCh := make(chan providerResult, 2)
-
-	clients := []provider.SearchProvider{
-		assrt.New(settings.LanguagePriority),
-		opensubtitles.New(settings.LanguagePriority),
+	recentJobs, err := s.repo.ListJobs(ctx, 8)
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
 	}
+	overview := model.Overview{
+		AppName:          "4subs",
+		AppSummary:       "面向本地媒体的双语字幕生成平台，使用 Go 后端、PrimeVue 前端和 DeepSeek 翻译能力。",
+		TranslationReady: s.translator.Ready(),
+		MediaAssetCount:  mediaCount,
+		PendingJobCount:  pendingCount,
+		RecentJobs:       recentJobs,
+		Pipeline:         pipeline.DefaultSteps(),
+		CurrentSettings:  settings,
+	}
+	s.writeJSON(writer, http.StatusOK, overview)
+}
 
-	var wg sync.WaitGroup
-	for _, client := range clients {
-		blob, err := s.repo.GetProviderCredentialBlob(r.Context(), client.Name())
+func (s *Server) handlePipeline(writer http.ResponseWriter, request *http.Request) {
+	s.writeJSON(writer, http.StatusOK, map[string]any{
+		"steps": pipeline.DefaultSteps(),
+		"runtime": map[string]any{
+			"ffmpeg_bin":          s.cfg.FFmpegBin,
+			"work_dir":            s.cfg.WorkDir,
+			"subtitle_output_dir": s.cfg.SubtitleOutputPath,
+			"translation_ready":   s.translator.Ready(),
+		},
+	})
+}
+
+func (s *Server) handleGetSettings(writer http.ResponseWriter, request *http.Request) {
+	settings, err := s.repo.GetSettings(request.Context())
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, settings)
+}
+
+func (s *Server) handleSaveSettings(writer http.ResponseWriter, request *http.Request) {
+	var settings model.AppSettings
+	if err := json.NewDecoder(request.Body).Decode(&settings); err != nil {
+		s.writeError(writer, http.StatusBadRequest, fmt.Errorf("请求体解析失败: %w", err))
+		return
+	}
+	if err := s.repo.SaveSettings(request.Context(), normalizeSettings(settings)); err != nil {
+		s.writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	fresh, err := s.repo.GetSettings(request.Context())
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, fresh)
+}
+
+func (s *Server) handleListMedia(writer http.ResponseWriter, request *http.Request) {
+	limit := parseLimit(request.URL.Query().Get("limit"), 200)
+	assets, err := s.repo.ListMediaAssets(request.Context(), limit)
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, map[string]any{"items": assets})
+}
+
+func (s *Server) handleScanMedia(writer http.ResponseWriter, request *http.Request) {
+	ctx := request.Context()
+	settings, err := s.repo.GetSettings(ctx)
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	assets, err := library.ScanMediaPaths(settings.MediaPaths)
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.repo.ReplaceMediaAssets(ctx, assets); err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, map[string]any{
+		"count": len(assets),
+		"items": assets,
+	})
+}
+
+func (s *Server) handleListJobs(writer http.ResponseWriter, request *http.Request) {
+	limit := parseLimit(request.URL.Query().Get("limit"), 100)
+	jobs, err := s.repo.ListJobs(request.Context(), limit)
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, map[string]any{"items": jobs})
+}
+
+func (s *Server) handleCreateJob(writer http.ResponseWriter, request *http.Request) {
+	var payload createJobRequest
+	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+		s.writeError(writer, http.StatusBadRequest, fmt.Errorf("请求体解析失败: %w", err))
+		return
+	}
+	settings, err := s.repo.GetSettings(request.Context())
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	if strings.TrimSpace(payload.MediaPath) == "" && payload.MediaAssetID != nil {
+		assets, err := s.repo.ListMediaAssets(request.Context(), 500)
 		if err != nil {
-			resultCh <- providerResult{Name: client.Name(), Err: err}
-			continue
-		}
-
-		credential, parseErr := parseCredentialBlob(blob, s.cfg.AppSecret, client.Name())
-		if parseErr != nil {
-			resultCh <- providerResult{Name: client.Name(), Err: parseErr}
-			continue
-		}
-		if len(credential) == 0 {
-			continue
-		}
-
-		wg.Add(1)
-		go func(searchClient provider.SearchProvider, cred map[string]string) {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-			defer cancel()
-
-			candidates, runErr := searchClient.Search(ctx, cred, input)
-			resultCh <- providerResult{
-				Name:       searchClient.Name(),
-				Candidates: candidates,
-				Err:        runErr,
-			}
-		}(client, credential)
-	}
-
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
-	allCandidates := make([]model.SubtitleCandidate, 0, 64)
-	errorsByProvider := make(map[string]string)
-	for result := range resultCh {
-		results = append(results, result)
-		if result.Err != nil {
-			errorsByProvider[result.Name] = result.Err.Error()
-			continue
-		}
-		allCandidates = append(allCandidates, result.Candidates...)
-	}
-
-	sort.Slice(allCandidates, func(i, j int) bool {
-		return allCandidates[i].Score > allCandidates[j].Score
-	})
-
-	if err := s.repo.ReplaceSubtitleCandidates(r.Context(), mediaID, allCandidates); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	s.events.Publish("candidates.updated", map[string]any{
-		"media_id":    mediaID,
-		"count":       len(allCandidates),
-		"providerErr": errorsByProvider,
-	})
-	writeJSON(w, http.StatusOK, map[string]any{
-		"media_id":    mediaID,
-		"count":       len(allCandidates),
-		"candidates":  allCandidates,
-		"errors":      errorsByProvider,
-		"providerRun": len(results),
-	})
-}
-
-func (s *Server) handleMediaCandidates(w http.ResponseWriter, r *http.Request) {
-	mediaID, err := strconv.ParseInt(strings.TrimSpace(chi.URLParam(r, "id")), 10, 64)
-	if err != nil || mediaID <= 0 {
-		writeError(w, http.StatusBadRequest, errors.New("invalid media id"))
-		return
-	}
-	limit := 100
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-		if parsed, parseErr := strconv.Atoi(raw); parseErr == nil && parsed > 0 && parsed <= 1000 {
-			limit = parsed
-		}
-	}
-
-	candidates, err := s.repo.ListSubtitleCandidates(r.Context(), mediaID, limit)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, candidates)
-}
-
-func (s *Server) handleDownloadCandidate(w http.ResponseWriter, r *http.Request) {
-	candidateID, err := strconv.ParseInt(strings.TrimSpace(chi.URLParam(r, "id")), 10, 64)
-	if err != nil || candidateID <= 0 {
-		writeError(w, http.StatusBadRequest, errors.New("invalid candidate id"))
-		return
-	}
-
-	candidate, err := s.repo.GetSubtitleCandidateByID(r.Context(), candidateID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, errors.New("candidate not found"))
+			s.writeError(writer, http.StatusInternalServerError, err)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	mediaItem, err := s.repo.GetMediaByID(r.Context(), candidate.MediaItemID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, errors.New("media not found"))
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	settings, err := s.repo.GetSettings(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	blob, err := s.repo.GetProviderCredentialBlob(r.Context(), candidate.ProviderName)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	credential, err := parseCredentialBlob(blob, s.cfg.AppSecret, candidate.ProviderName)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-
-	var downloader provider.DownloadProvider
-	switch candidate.ProviderName {
-	case "assrt":
-		downloader = assrt.New(settings.LanguagePriority)
-	case "opensubtitles":
-		downloader = opensubtitles.New(settings.LanguagePriority)
-	default:
-		writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported provider: %s", candidate.ProviderName))
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	result, err := downloader.Download(ctx, credential, candidate)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-
-	content, ext, err := normalizeSubtitlePayload(result.Data, result.FileName)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	filePath, err := s.persistSubtitleFile(mediaItem, settings.SubtitleOutputPath, candidate.Language, ext, content)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	checksum := sha256.Sum256(content)
-	if err := s.repo.SaveSubtitleFile(
-		r.Context(),
-		mediaItem.ID,
-		candidate.Language,
-		candidate.ProviderName,
-		candidate.ReleaseName,
-		filePath,
-		hex.EncodeToString(checksum[:]),
-	); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	s.events.Publish("subtitle.downloaded", map[string]any{
-		"candidate_id": candidateID,
-		"media_id":     mediaItem.ID,
-		"path":         filePath,
-		"provider":     candidate.ProviderName,
-	})
-	writeJSON(w, http.StatusOK, map[string]any{
-		"candidate_id": candidateID,
-		"media_id":     mediaItem.ID,
-		"file_path":    filePath,
-		"provider":     candidate.ProviderName,
-		"note":         result.Note,
-	})
-}
-
-func (s *Server) staticHandler() http.Handler {
-	index := filepath.Join(s.cfg.StaticDir, "index.html")
-	if _, err := os.Stat(index); err == nil {
-		fs := http.FileServer(http.Dir(s.cfg.StaticDir))
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			relativePath := strings.TrimPrefix(r.URL.Path, "/")
-			path := filepath.Join(s.cfg.StaticDir, filepath.Clean(relativePath))
-			if info, err := os.Stat(path); err == nil && !info.IsDir() {
-				fs.ServeHTTP(w, r)
-				return
-			}
-			http.ServeFile(w, r, index)
-		})
-	}
-
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"message": "frontend build not found. run npm run build in /web or use Docker image",
-		})
-	})
-}
-
-func writeError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]string{"error": err.Error()})
-}
-
-func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func encrypt(plaintext []byte, secret string) (string, error) {
-	if strings.TrimSpace(secret) == "" {
-		// Bootstrap fallback; caller should set APP_SECRET for real deployments.
-		return "plain:" + base64.StdEncoding.EncodeToString(plaintext), nil
-	}
-
-	key := sha256.Sum256([]byte(secret))
-	block, err := aes.NewCipher(key[:])
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", err
-	}
-	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
-	return "enc:" + base64.StdEncoding.EncodeToString(ciphertext), nil
-}
-
-func decrypt(ciphertext string, secret string) ([]byte, error) {
-	if strings.TrimSpace(secret) == "" {
-		return nil, errors.New("app secret is empty")
-	}
-	key := sha256.Sum256([]byte(secret))
-	block, err := aes.NewCipher(key[:])
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := base64.StdEncoding.DecodeString(ciphertext)
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) < gcm.NonceSize() {
-		return nil, errors.New("ciphertext too short")
-	}
-	nonce := raw[:gcm.NonceSize()]
-	payload := raw[gcm.NonceSize():]
-	plaintext, err := gcm.Open(nil, nonce, payload, nil)
-	if err != nil {
-		return nil, err
-	}
-	return plaintext, nil
-}
-
-func parseCredentialBlob(blob string, secret string, providerName string) (map[string]string, error) {
-	trimmed := strings.TrimSpace(blob)
-	if trimmed == "" {
-		return map[string]string{}, nil
-	}
-
-	parseJSON := func(raw []byte) (map[string]string, error) {
-		out := make(map[string]string)
-		if err := json.Unmarshal(raw, &out); err == nil && len(out) > 0 {
-			return out, nil
-		}
-		return nil, errors.New("credential json invalid")
-	}
-
-	if strings.HasPrefix(trimmed, "plain:") {
-		payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(trimmed, "plain:"))
-		if err != nil {
-			return nil, err
-		}
-		if parsed, err := parseJSON(payload); err == nil {
-			return parsed, nil
-		}
-		if providerName == "assrt" {
-			return map[string]string{"token": string(payload)}, nil
-		}
-		return nil, errors.New("invalid plain credential payload")
-	}
-
-	if strings.HasPrefix(trimmed, "enc:") {
-		payload, err := decrypt(strings.TrimPrefix(trimmed, "enc:"), secret)
-		if err != nil {
-			return nil, err
-		}
-		if parsed, err := parseJSON(payload); err == nil {
-			return parsed, nil
-		}
-		return nil, errors.New("invalid encrypted credential payload")
-	}
-
-	if strings.HasPrefix(trimmed, "{") {
-		if parsed, err := parseJSON([]byte(trimmed)); err == nil {
-			return parsed, nil
-		}
-	}
-
-	// Legacy assrt token format.
-	if providerName == "assrt" {
-		return map[string]string{"token": trimmed}, nil
-	}
-	return nil, errors.New("unsupported credential format")
-}
-
-func normalizeSubtitlePayload(raw []byte, sourceName string) ([]byte, string, error) {
-	if len(raw) == 0 {
-		return nil, "", errors.New("empty subtitle payload")
-	}
-
-	ext := strings.ToLower(filepath.Ext(sourceName))
-	if isZipBytes(raw) || ext == ".zip" {
-		content, detectedExt, err := extractFromZip(raw)
-		if err == nil {
-			return content, detectedExt, nil
-		}
-	}
-
-	if isGzipBytes(raw) || ext == ".gz" {
-		reader, err := gzip.NewReader(bytes.NewReader(raw))
-		if err == nil {
-			defer reader.Close()
-			content, readErr := io.ReadAll(reader)
-			if readErr == nil && len(content) > 0 {
-				baseExt := strings.ToLower(filepath.Ext(strings.TrimSuffix(sourceName, ext)))
-				if !isSubtitleExt(baseExt) {
-					baseExt = ".srt"
-				}
-				return content, baseExt, nil
+		for _, asset := range assets {
+			if asset.ID == *payload.MediaAssetID {
+				payload.MediaPath = asset.FilePath
+				payload.FileName = filepath.Base(asset.FilePath)
+				break
 			}
 		}
 	}
-
-	if !isSubtitleExt(ext) {
-		ext = ".srt"
-	}
-	return raw, ext, nil
-}
-
-func extractFromZip(raw []byte) ([]byte, string, error) {
-	reader, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	job, err := s.repo.CreateJob(request.Context(), db.CreateJobInput{
+		MediaAssetID:   payload.MediaAssetID,
+		MediaPath:      payload.MediaPath,
+		FileName:       firstNonEmpty(payload.FileName, filepath.Base(payload.MediaPath)),
+		SourceLanguage: firstNonEmpty(payload.SourceLanguage, settings.SourceLanguage),
+		TargetLanguage: firstNonEmpty(payload.TargetLanguage, settings.TargetLanguage),
+		Provider:       settings.TranslationProvider,
+		OutputFormats:  normalizeFormats(payload.OutputFormats, settings.OutputFormats),
+		Details:        firstNonEmpty(payload.Details, "任务已创建，等待后续接入完整字幕处理流水线。"),
+	})
 	if err != nil {
-		return nil, "", err
+		s.writeError(writer, http.StatusBadRequest, err)
+		return
 	}
-	for _, file := range reader.File {
-		if file.FileInfo().IsDir() {
-			continue
-		}
-		ext := strings.ToLower(filepath.Ext(file.Name))
-		if !isSubtitleExt(ext) {
-			continue
-		}
-		rc, err := file.Open()
-		if err != nil {
-			continue
-		}
-		content, readErr := io.ReadAll(rc)
-		_ = rc.Close()
-		if readErr == nil && len(content) > 0 {
-			return content, ext, nil
-		}
-	}
-	return nil, "", errors.New("no subtitle file found in zip archive")
+	s.writeJSON(writer, http.StatusCreated, job)
 }
 
-func isZipBytes(raw []byte) bool {
-	return len(raw) > 4 && raw[0] == 'P' && raw[1] == 'K'
+func (s *Server) writeJSON(writer http.ResponseWriter, status int, payload any) {
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(status)
+	_ = json.NewEncoder(writer).Encode(payload)
 }
 
-func isGzipBytes(raw []byte) bool {
-	return len(raw) > 2 && raw[0] == 0x1f && raw[1] == 0x8b
+func (s *Server) writeError(writer http.ResponseWriter, status int, err error) {
+	message := "请求失败"
+	if err != nil {
+		message = err.Error()
+	}
+	s.writeJSON(writer, status, map[string]any{
+		"error": message,
+	})
 }
 
-func isSubtitleExt(ext string) bool {
-	switch strings.ToLower(ext) {
-	case ".srt", ".ass", ".ssa", ".vtt", ".sub":
-		return true
-	default:
-		return false
+func normalizeSettings(settings model.AppSettings) model.AppSettings {
+	settings.MediaPaths = trimNonEmpty(settings.MediaPaths)
+	settings.OutputFormats = normalizeFormats(settings.OutputFormats, []string{"srt"})
+	settings.SourceLanguage = firstNonEmpty(settings.SourceLanguage, "auto")
+	settings.TargetLanguage = firstNonEmpty(settings.TargetLanguage, "zh-CN")
+	settings.BilingualLayout = firstNonEmpty(settings.BilingualLayout, "origin_above")
+	settings.TranslationProvider = firstNonEmpty(settings.TranslationProvider, "deepseek")
+	settings.TranslationModel = firstNonEmpty(settings.TranslationModel, "deepseek-chat")
+	if settings.MaxSubtitlePerBatch <= 0 {
+		settings.MaxSubtitlePerBatch = 30
 	}
+	return settings
 }
 
-func (s *Server) persistSubtitleFile(mediaItem model.MediaItem, outputRoot string, language string, ext string, data []byte) (string, error) {
-	lang := strings.ToLower(strings.TrimSpace(language))
-	if lang == "" {
-		lang = "unknown"
+func trimNonEmpty(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
 	}
-	if !isSubtitleExt(ext) {
-		ext = ".srt"
-	}
-
-	relativeDir := s.relativeMediaDir(mediaItem.FilePath)
-	targetDir := filepath.Join(outputRoot, relativeDir)
-	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return "", err
-	}
-
-	baseName := strings.TrimSuffix(filepath.Base(mediaItem.FilePath), filepath.Ext(mediaItem.FilePath))
-	fileName := fmt.Sprintf("%s.%s%s", baseName, lang, ext)
-	targetPath := filepath.Join(targetDir, fileName)
-	if _, err := os.Stat(targetPath); err == nil {
-		fileName = fmt.Sprintf("%s.%s.manual-%d%s", baseName, lang, time.Now().Unix(), ext)
-		targetPath = filepath.Join(targetDir, fileName)
-	}
-
-	if err := os.WriteFile(targetPath, data, 0o644); err != nil {
-		return "", err
-	}
-	return targetPath, nil
+	return result
 }
 
-func (s *Server) relativeMediaDir(mediaPath string) string {
-	for _, root := range s.cfg.MediaPaths {
-		root = strings.TrimSpace(root)
-		if root == "" {
+func normalizeFormats(values []string, fallback []string) []string {
+	result := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		trimmed := strings.ToLower(strings.TrimSpace(value))
+		if trimmed == "" {
 			continue
 		}
-		rel, err := filepath.Rel(root, mediaPath)
-		if err != nil {
+		if _, ok := seen[trimmed]; ok {
 			continue
 		}
-		if strings.HasPrefix(rel, "..") {
-			continue
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	if len(result) == 0 {
+		return fallback
+	}
+	return result
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
 		}
-		dir := filepath.Dir(rel)
-		if dir == "." {
-			return ""
-		}
-		return dir
 	}
 	return ""
 }
+
+func parseLimit(raw string, fallback int) int {
+	limit, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || limit <= 0 {
+		return fallback
+	}
+	if limit > 500 {
+		return 500
+	}
+	return limit
+}
+

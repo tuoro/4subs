@@ -1,177 +1,124 @@
-<template>
-  <section>
-    <div class="page-header">
-      <h1>Settings</h1>
-      <Button label="Save" icon="pi pi-save" :loading="saving" @click="saveAll" />
-    </div>
-
-    <Card>
-      <template #title>Language Priority</template>
-      <template #subtitle>Default: bilingual > zh-cn > zh-tw</template>
-      <template #content>
-        <div class="priority-list">
-          <div v-for="(lang, index) in languagePriority" :key="lang" class="priority-item">
-            <span>{{ index + 1 }}. {{ labelForLanguage(lang) }}</span>
-            <div class="row-actions">
-              <Button icon="pi pi-arrow-up" text rounded size="small" :disabled="index === 0" @click="moveUp(index)" />
-              <Button icon="pi pi-arrow-down" text rounded size="small" :disabled="index === languagePriority.length - 1" @click="moveDown(index)" />
-            </div>
-          </div>
+﻿<template>
+  <section class="page-grid">
+    <Card class="span-12">
+      <template #title>
+        <div class="card-title-row">
+          <h2>项目设置</h2>
+          <Button label="保存设置" icon="pi pi-save" @click="handleSave" :loading="saving" />
         </div>
+      </template>
+      <template #content>
+        <Message v-if="message" severity="success" :closable="false">{{ message }}</Message>
+        <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
 
-        <div class="mt-16">
-          <ToggleSwitch v-model="autoReplace" inputId="replace" disabled />
-          <label for="replace" class="ml-8">Auto replace existing subtitle (disabled by design)</label>
+        <div class="form-grid">
+          <div class="field-group full">
+            <label class="field-label">媒体目录</label>
+            <textarea v-model="mediaPathsText" class="field-textarea" placeholder="每行一个目录，例如&#10;/media/movies&#10;/media/tv"></textarea>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label">源语言</label>
+            <input v-model="form.source_language" class="field-input" placeholder="auto" />
+          </div>
+
+          <div class="field-group">
+            <label class="field-label">目标语言</label>
+            <input v-model="form.target_language" class="field-input" placeholder="zh-CN" />
+          </div>
+
+          <div class="field-group">
+            <label class="field-label">双语布局</label>
+            <input v-model="form.bilingual_layout" class="field-input" placeholder="origin_above" />
+          </div>
+
+          <div class="field-group">
+            <label class="field-label">输出格式</label>
+            <input v-model="outputFormatsText" class="field-input" placeholder="srt,ass" />
+          </div>
+
+          <div class="field-group">
+            <label class="field-label">翻译提供方</label>
+            <input v-model="form.translation_provider" class="field-input" placeholder="deepseek" />
+          </div>
+
+          <div class="field-group">
+            <label class="field-label">翻译模型</label>
+            <input v-model="form.translation_model" class="field-input" placeholder="deepseek-chat" />
+          </div>
+
+          <div class="field-group full">
+            <label class="field-label">翻译提示词</label>
+            <textarea v-model="form.translation_prompt" class="field-textarea" placeholder="请输入翻译提示词"></textarea>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label">单批次字幕条数</label>
+            <input v-model.number="form.max_subtitle_per_batch" type="number" class="field-input" min="1" />
+          </div>
         </div>
       </template>
     </Card>
-
-    <Card class="mt-16">
-      <template #title>Provider Credentials</template>
-      <template #content>
-        <DataTable :value="providers" stripedRows>
-          <Column field="display_name" header="Provider" />
-          <Column field="configured" header="Configured">
-            <template #body="slotProps">
-              <Tag :value="slotProps.data.configured ? 'yes' : 'no'" :severity="slotProps.data.configured ? 'success' : 'warn'" />
-            </template>
-          </Column>
-          <Column field="note" header="Note" />
-        </DataTable>
-
-        <div class="provider-form-grid mt-16">
-          <div>
-            <h3>ASSRT</h3>
-            <InputText v-model="assrtToken" placeholder="ASSRT token" class="w-full" />
-            <Button label="Save ASSRT" class="mt-8" @click="saveAssrt" />
-          </div>
-          <div>
-            <h3>OpenSubtitles.com</h3>
-            <InputText v-model="osApiKey" placeholder="API Key" class="w-full" />
-            <InputText v-model="osUserAgent" placeholder="User Agent" class="w-full mt-8" />
-            <InputText v-model="osUsername" placeholder="Username (optional)" class="w-full mt-8" />
-            <Password v-model="osPassword" placeholder="Password (optional)" :feedback="false" toggleMask class="w-full mt-8" />
-            <Button label="Save OpenSubtitles" class="mt-8" @click="saveOpenSubtitles" />
-          </div>
-        </div>
-      </template>
-    </Card>
-
-    <Toast />
   </section>
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
-import { useToast } from 'primevue/usetoast'
+import { onMounted, reactive, ref } from 'vue'
 import Button from 'primevue/button'
 import Card from 'primevue/card'
-import DataTable from 'primevue/datatable'
-import Column from 'primevue/column'
-import InputText from 'primevue/inputtext'
-import Password from 'primevue/password'
-import Tag from 'primevue/tag'
-import ToggleSwitch from 'primevue/toggleswitch'
-import Toast from 'primevue/toast'
+import Message from 'primevue/message'
+import { getSettings, saveSettings } from '../api'
 
-import { getProviders, getSettings, saveProviderCredential, saveSettings } from '../api'
+const form = reactive({
+  source_language: 'auto',
+  target_language: 'zh-CN',
+  bilingual_layout: 'origin_above',
+  translation_provider: 'deepseek',
+  translation_model: 'deepseek-chat',
+  translation_prompt: '',
+  max_subtitle_per_batch: 30
+})
 
-const toast = useToast()
+const mediaPathsText = ref('')
+const outputFormatsText = ref('srt')
 const saving = ref(false)
+const message = ref('')
+const errorMessage = ref('')
 
-const providers = ref([])
-const languagePriority = ref(['bilingual', 'zh-cn', 'zh-tw'])
-const autoReplace = ref(false)
-const subtitleOutputPath = ref('/app/subtitles')
-
-const assrtToken = ref('')
-const osApiKey = ref('')
-const osUserAgent = ref('4subs v0.1.0')
-const osUsername = ref('')
-const osPassword = ref('')
-
-const labelForLanguage = (lang) => {
-  if (lang === 'bilingual') return 'Bilingual'
-  if (lang === 'zh-cn') return 'Simplified Chinese'
-  if (lang === 'zh-tw') return 'Traditional Chinese'
-  return lang
-}
-
-const moveUp = (index) => {
-  if (index <= 0) return
-  const arr = [...languagePriority.value]
-  ;[arr[index - 1], arr[index]] = [arr[index], arr[index - 1]]
-  languagePriority.value = arr
-}
-
-const moveDown = (index) => {
-  if (index >= languagePriority.value.length - 1) return
-  const arr = [...languagePriority.value]
-  ;[arr[index], arr[index + 1]] = [arr[index + 1], arr[index]]
-  languagePriority.value = arr
-}
-
-const load = async () => {
-  const [settings, providerRows] = await Promise.all([getSettings(), getProviders()])
-  languagePriority.value = settings.language_priority
-  autoReplace.value = settings.auto_replace_existing
-  subtitleOutputPath.value = settings.subtitle_output_path
-  providers.value = providerRows
-}
-
-const notify = (severity, summary, detail) => {
-  toast.add({ severity, summary, detail, life: 2500 })
-}
-
-const saveAll = async () => {
-  saving.value = true
+async function loadSettings() {
   try {
-    await saveSettings({
-      language_priority: languagePriority.value,
-      auto_replace_existing: false,
-      subtitle_output_path: subtitleOutputPath.value
-    })
-    notify('success', 'Saved', 'Settings updated')
+    errorMessage.value = ''
+    const payload = await getSettings()
+    mediaPathsText.value = (payload.media_paths || []).join('\n')
+    outputFormatsText.value = (payload.output_formats || []).join(',')
+    Object.assign(form, payload)
   } catch (error) {
-    notify('error', 'Save failed', error.message)
+    errorMessage.value = error.message
+  }
+}
+
+async function handleSave() {
+  try {
+    saving.value = true
+    message.value = ''
+    errorMessage.value = ''
+    const payload = {
+      ...form,
+      media_paths: mediaPathsText.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+      output_formats: outputFormatsText.value.split(',').map((item) => item.trim()).filter(Boolean)
+    }
+    const saved = await saveSettings(payload)
+    mediaPathsText.value = (saved.media_paths || []).join('\n')
+    outputFormatsText.value = (saved.output_formats || []).join(',')
+    Object.assign(form, saved)
+    message.value = '设置已保存'
+  } catch (error) {
+    errorMessage.value = error.message
   } finally {
     saving.value = false
   }
 }
 
-const saveAssrt = async () => {
-  if (!assrtToken.value) {
-    notify('warn', 'Missing token', 'Please input ASSRT token')
-    return
-  }
-  try {
-    await saveProviderCredential('assrt', { token: assrtToken.value })
-    await load()
-    notify('success', 'Saved', 'ASSRT credential updated')
-  } catch (error) {
-    notify('error', 'Save failed', error.message)
-  }
-}
-
-const saveOpenSubtitles = async () => {
-  if (!osApiKey.value) {
-    notify('warn', 'Missing key', 'Please input OpenSubtitles API key')
-    return
-  }
-
-  try {
-    await saveProviderCredential('opensubtitles', {
-      api_key: osApiKey.value,
-      user_agent: osUserAgent.value,
-      username: osUsername.value,
-      password: osPassword.value
-    })
-    await load()
-    notify('success', 'Saved', 'OpenSubtitles credential updated')
-  } catch (error) {
-    notify('error', 'Save failed', error.message)
-  }
-}
-
-onMounted(load)
+onMounted(loadSettings)
 </script>
+

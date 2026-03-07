@@ -1,4 +1,4 @@
-package config
+﻿package config
 
 import (
 	"errors"
@@ -11,53 +11,49 @@ type Config struct {
 	HTTPAddr            string
 	DBPath              string
 	DataDir             string
+	WorkDir             string
 	ConfigDir           string
 	StaticDir           string
 	SubtitleOutputPath  string
 	MediaPaths          []string
+	FFmpegBin           string
+	TranslationProvider string
+	DeepSeekBaseURL     string
+	DeepSeekAPIKey      string
+	DeepSeekModel       string
 	AppSecret           string
-	ASSRTToken          string
-	OpenSubtitlesAPIKey string
-	OpenSubtitlesUser   string
-	OpenSubtitlesPass   string
-	OpenSubtitlesUA     string
 }
 
 func Load() (Config, error) {
 	cfg := Config{
 		HTTPAddr:            envOrDefault("HTTP_ADDR", ":8080"),
 		DataDir:             envOrDefault("DATA_DIR", "/app/data"),
+		WorkDir:             envOrDefault("WORK_DIR", "/app/work"),
 		ConfigDir:           envOrDefault("CONFIG_DIR", "/app/config"),
 		StaticDir:           envOrDefault("STATIC_DIR", "/app/web/dist"),
 		SubtitleOutputPath:  envOrDefault("SUBTITLE_OUTPUT_PATH", "/app/subtitles"),
 		MediaPaths:          splitComma(envOrDefault("MEDIA_PATHS", "/media")),
-		AppSecret:           os.Getenv("APP_SECRET"),
-		ASSRTToken:          os.Getenv("ASSRT_TOKEN"),
-		OpenSubtitlesAPIKey: os.Getenv("OPENSUBTITLES_API_KEY"),
-		OpenSubtitlesUser:   os.Getenv("OPENSUBTITLES_USERNAME"),
-		OpenSubtitlesPass:   os.Getenv("OPENSUBTITLES_PASSWORD"),
-		OpenSubtitlesUA:     envOrDefault("OPENSUBTITLES_USER_AGENT", "4subs v0.1.0"),
+		FFmpegBin:           envOrDefault("FFMPEG_BIN", "ffmpeg"),
+		TranslationProvider: envOrDefault("TRANSLATION_PROVIDER", "deepseek"),
+		DeepSeekBaseURL:     envOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+		DeepSeekAPIKey:      strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
+		DeepSeekModel:       envOrDefault("DEEPSEEK_MODEL", "deepseek-chat"),
+		AppSecret:           strings.TrimSpace(os.Getenv("APP_SECRET")),
 	}
 
 	cfg.DBPath = envOrDefault("DB_PATH", filepath.Join(cfg.DataDir, "4subs.db"))
-
-	if err := ensureDirs(cfg.DataDir, cfg.ConfigDir, cfg.SubtitleOutputPath); err != nil {
+	if err := ensureDirs(cfg.DataDir, cfg.WorkDir, cfg.ConfigDir, cfg.SubtitleOutputPath); err != nil {
 		return Config{}, err
 	}
-
-	if cfg.OpenSubtitlesAPIKey == "" {
-		// Empty is allowed for bootstrap, but app should show unconfigured state.
-	}
-
 	return cfg, nil
 }
 
 func ensureDirs(paths ...string) error {
-	for _, p := range paths {
-		if p == "" {
-			return errors.New("directory path is empty")
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			return errors.New("目录路径不能为空")
 		}
-		if err := os.MkdirAll(p, 0o755); err != nil {
+		if err := os.MkdirAll(path, 0o755); err != nil {
 			return err
 		}
 	}
@@ -77,9 +73,10 @@ func splitComma(raw string) []string {
 }
 
 func envOrDefault(key, fallback string) string {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
 		return fallback
 	}
-	return v
+	return value
 }
+

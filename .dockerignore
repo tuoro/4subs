@@ -3,3 +3,8 @@
 web/node_modules
 web/dist
 deploy
+data
+media
+server.exe
+*.db
+*.sqlite

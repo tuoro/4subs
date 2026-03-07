@@ -1,7 +1,5 @@
-const API_BASE = '/api/v1'
-
-async function request(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, {
+﻿export async function apiRequest(path, options = {}) {
+  const response = await fetch(path, {
     headers: {
       'Content-Type': 'application/json',
       ...(options.headers || {})
@@ -9,71 +7,54 @@ async function request(path, options = {}) {
     ...options
   })
 
-  const data = await response.json().catch(() => ({}))
+  const text = await response.text()
+  const payload = text ? JSON.parse(text) : null
+
   if (!response.ok) {
-    throw new Error(data.error || `Request failed: ${response.status}`)
+    const message = payload?.error || `请求失败: ${response.status}`
+    throw new Error(message)
   }
-  return data
+
+  return payload
 }
 
-export function getHealth() {
-  return request('/health')
+export function getOverview() {
+  return apiRequest('/api/v1/overview')
 }
 
-export function getJobs() {
-  return request('/jobs?limit=100')
-}
-
-export function triggerScan() {
-  return request('/scan', { method: 'POST' })
-}
-
-export function getMedia(options = {}) {
-  const params = new URLSearchParams()
-  if (options.missingOnly) {
-    params.set('missing_sub', 'true')
-  }
-  if (options.limit) {
-    params.set('limit', String(options.limit))
-  }
-  const suffix = params.toString() ? `?${params.toString()}` : ''
-  return request(`/media${suffix}`)
-}
-
-export function searchMediaSubtitles(mediaId) {
-  return request(`/media/${mediaId}/search-subtitles`, {
-    method: 'POST'
-  })
-}
-
-export function getMediaCandidates(mediaId, limit = 100) {
-  return request(`/media/${mediaId}/candidates?limit=${limit}`)
-}
-
-export function downloadCandidate(candidateId) {
-  return request(`/candidates/${candidateId}/download`, {
-    method: 'POST'
-  })
+export function getPipeline() {
+  return apiRequest('/api/v1/pipeline')
 }
 
 export function getSettings() {
-  return request('/settings')
+  return apiRequest('/api/v1/settings')
 }
 
 export function saveSettings(payload) {
-  return request('/settings', {
+  return apiRequest('/api/v1/settings', {
     method: 'PUT',
     body: JSON.stringify(payload)
   })
 }
 
-export function getProviders() {
-  return request('/providers')
+export function listMedia(limit = 200) {
+  return apiRequest(`/api/v1/media?limit=${limit}`)
 }
 
-export function saveProviderCredential(provider, payload) {
-  return request(`/providers/${provider}/credential`, {
-    method: 'PUT',
+export function scanMedia() {
+  return apiRequest('/api/v1/media/scan', {
+    method: 'POST'
+  })
+}
+
+export function listJobs(limit = 100) {
+  return apiRequest(`/api/v1/jobs?limit=${limit}`)
+}
+
+export function createJob(payload) {
+  return apiRequest('/api/v1/jobs', {
+    method: 'POST',
     body: JSON.stringify(payload)
   })
 }
+

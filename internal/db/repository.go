@@ -1,741 +1,427 @@
-package db
+﻿package db
 
 import (
 	"context"
 	"database/sql"
-	"embed"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gayhub/4subs/internal/config"
 	"github.com/gayhub/4subs/internal/model"
-	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
 
-//go:embed migrations/*.sql
-var migrationFS embed.FS
+//go:embed migrations/001_init.sql
+var initSQL string
 
 type Repository struct {
 	db *sql.DB
 }
 
-func Open(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+type CreateJobInput struct {
+	MediaAssetID   *int64
+	MediaPath      string
+	FileName       string
+	SourceLanguage string
+	TargetLanguage string
+	Provider       string
+	OutputFormats  []string
+	Details        string
+}
+
+func Open(dbPath string) (*sql.DB, error) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		return nil, err
+	}
+	database, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-
-	if _, err := db.Exec("PRAGMA foreign_keys = ON;"); err != nil {
-		_ = db.Close()
+	database.SetMaxOpenConns(1)
+	if err := migrate(database); err != nil {
+		_ = database.Close()
 		return nil, err
 	}
-
-	if err := applyMigrations(db); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-
-	return db, nil
+	return database, nil
 }
 
-func applyMigrations(db *sql.DB) error {
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			name TEXT PRIMARY KEY,
-			applied_at TEXT NOT NULL
-		);
-	`); err != nil {
-		return err
-	}
-
-	entries, err := migrationFS.ReadDir("migrations")
-	if err != nil {
-		return err
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
-	})
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
-			continue
-		}
-
-		var exists int
-		checkErr := db.QueryRow(`SELECT 1 FROM schema_migrations WHERE name = ? LIMIT 1;`, entry.Name()).Scan(&exists)
-		if checkErr == nil {
-			continue
-		}
-		if checkErr != nil && checkErr != sql.ErrNoRows {
-			return checkErr
-		}
-
-		sqlBytes, readErr := migrationFS.ReadFile("migrations/" + entry.Name())
-		if readErr != nil {
-			return readErr
-		}
-		if _, execErr := db.Exec(string(sqlBytes)); execErr != nil {
-			return fmt.Errorf("apply migration %s: %w", entry.Name(), execErr)
-		}
-		if _, insertErr := db.Exec(
-			`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?);`,
-			entry.Name(),
-			time.Now().UTC().Format(time.RFC3339),
-		); insertErr != nil {
-			return fmt.Errorf("record migration %s: %w", entry.Name(), insertErr)
-		}
-	}
-	return nil
+func migrate(database *sql.DB) error {
+	_, err := database.Exec(initSQL)
+	return err
 }
 
-func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+func NewRepository(database *sql.DB) *Repository {
+	return &Repository{db: database}
 }
 
 func (r *Repository) EnsureDefaults(ctx context.Context, cfg config.Config) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	lang, _ := json.Marshal([]string{"bilingual", "zh-cn", "zh-tw"})
-
-	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO app_settings (id, language_priority, auto_replace_existing, subtitle_output_path, updated_at)
-		VALUES (1, ?, 0, ?, ?)
-		ON CONFLICT(id) DO NOTHING;
-	`, string(lang), cfg.SubtitleOutputPath, now)
-	if err != nil {
+	var count int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM app_settings WHERE id = 1`).Scan(&count); err != nil {
 		return err
 	}
-
-	providers := []struct {
-		Name string
-		Blob string
-	}{
-		{Name: "assrt", Blob: ""},
-		{Name: "opensubtitles", Blob: ""},
-	}
-	for _, p := range providers {
-		if _, err := r.db.ExecContext(ctx, `
-			INSERT INTO provider_credentials (name, secret_blob, updated_at)
-			VALUES (?, ?, ?)
-			ON CONFLICT(name) DO NOTHING;
-		`, p.Name, p.Blob, now); err != nil {
-			return err
-		}
+	if count > 0 {
+		return nil
 	}
 
-	if cfg.ASSRTToken != "" {
-		if err := r.SaveProviderCredential(ctx, "assrt", cfg.ASSRTToken); err != nil {
-			return err
-		}
+	settings := model.AppSettings{
+		MediaPaths:          cfg.MediaPaths,
+		SourceLanguage:      "auto",
+		TargetLanguage:      "zh-CN",
+		BilingualLayout:     "origin_above",
+		OutputFormats:       []string{"srt"},
+		TranslationProvider: cfg.TranslationProvider,
+		TranslationModel:    cfg.DeepSeekModel,
+		TranslationPrompt:   "逐条翻译字幕文本，保留原意、语气和专有名词，不要合并条目。",
+		MaxSubtitlePerBatch: 30,
+		UpdatedAt:           time.Now().UTC(),
 	}
-
-	if cfg.OpenSubtitlesAPIKey != "" {
-		seed := map[string]string{
-			"api_key":    cfg.OpenSubtitlesAPIKey,
-			"username":   cfg.OpenSubtitlesUser,
-			"password":   cfg.OpenSubtitlesPass,
-			"user_agent": cfg.OpenSubtitlesUA,
-		}
-		if err := r.SaveProviderCredentialJSON(ctx, "opensubtitles", seed); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return r.SaveSettings(ctx, settings)
 }
 
-func (r *Repository) GetSettings(ctx context.Context) (model.Settings, error) {
-	var out model.Settings
-	var rawPriority string
-	var autoReplace int
+func (r *Repository) GetSettings(ctx context.Context) (model.AppSettings, error) {
+	var (
+		mediaPathsJSON    string
+		outputFormatsJSON string
+		updatedAtRaw      string
+		settings          model.AppSettings
+	)
 	row := r.db.QueryRowContext(ctx, `
-		SELECT language_priority, auto_replace_existing, subtitle_output_path
-		FROM app_settings
-		WHERE id = 1;
-	`)
-	if err := row.Scan(&rawPriority, &autoReplace, &out.SubtitleOutputPath); err != nil {
-		return out, err
+		SELECT media_paths_json, source_language, target_language, bilingual_layout,
+		       output_formats_json, translation_provider, translation_model,
+		       translation_prompt, max_subtitle_per_batch, updated_at
+		FROM app_settings WHERE id = 1`)
+	if err := row.Scan(
+		&mediaPathsJSON,
+		&settings.SourceLanguage,
+		&settings.TargetLanguage,
+		&settings.BilingualLayout,
+		&outputFormatsJSON,
+		&settings.TranslationProvider,
+		&settings.TranslationModel,
+		&settings.TranslationPrompt,
+		&settings.MaxSubtitlePerBatch,
+		&updatedAtRaw,
+	); err != nil {
+		return model.AppSettings{}, err
 	}
-	if err := json.Unmarshal([]byte(rawPriority), &out.LanguagePriority); err != nil {
-		return out, err
+	if err := json.Unmarshal([]byte(mediaPathsJSON), &settings.MediaPaths); err != nil {
+		return model.AppSettings{}, err
 	}
-	out.AutoReplaceExisting = autoReplace == 1
-	return out, nil
+	if err := json.Unmarshal([]byte(outputFormatsJSON), &settings.OutputFormats); err != nil {
+		return model.AppSettings{}, err
+	}
+	settings.UpdatedAt = parseTime(updatedAtRaw)
+	return settings, nil
 }
 
-func (r *Repository) UpdateSettings(ctx context.Context, settings model.Settings) error {
-	if len(settings.LanguagePriority) == 0 {
-		return errors.New("language_priority cannot be empty")
+func (r *Repository) SaveSettings(ctx context.Context, settings model.AppSettings) error {
+	if len(settings.MediaPaths) == 0 {
+		return errors.New("至少需要一个媒体目录")
 	}
-	rawPriority, err := json.Marshal(settings.LanguagePriority)
+	if strings.TrimSpace(settings.SourceLanguage) == "" {
+		settings.SourceLanguage = "auto"
+	}
+	if strings.TrimSpace(settings.TargetLanguage) == "" {
+		settings.TargetLanguage = "zh-CN"
+	}
+	if strings.TrimSpace(settings.BilingualLayout) == "" {
+		settings.BilingualLayout = "origin_above"
+	}
+	if len(settings.OutputFormats) == 0 {
+		settings.OutputFormats = []string{"srt"}
+	}
+	if strings.TrimSpace(settings.TranslationProvider) == "" {
+		settings.TranslationProvider = "deepseek"
+	}
+	if strings.TrimSpace(settings.TranslationModel) == "" {
+		settings.TranslationModel = "deepseek-chat"
+	}
+	if settings.MaxSubtitlePerBatch <= 0 {
+		settings.MaxSubtitlePerBatch = 30
+	}
+	settings.UpdatedAt = time.Now().UTC()
+
+	mediaPathsJSON, err := json.Marshal(settings.MediaPaths)
 	if err != nil {
 		return err
 	}
-	autoReplace := 0
-	if settings.AutoReplaceExisting {
-		autoReplace = 1
+	outputFormatsJSON, err := json.Marshal(settings.OutputFormats)
+	if err != nil {
+		return err
 	}
 
 	_, err = r.db.ExecContext(ctx, `
-		UPDATE app_settings
-		SET language_priority = ?, auto_replace_existing = ?, subtitle_output_path = ?, updated_at = ?
-		WHERE id = 1;
-	`, string(rawPriority), autoReplace, settings.SubtitleOutputPath, time.Now().UTC().Format(time.RFC3339))
-	return err
-}
-
-func (r *Repository) ListProviders(ctx context.Context) ([]model.ProviderStatus, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT name, secret_blob
-		FROM provider_credentials
-		ORDER BY name;
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	providers := make([]model.ProviderStatus, 0, 2)
-	for rows.Next() {
-		var name string
-		var blob string
-		if err := rows.Scan(&name, &blob); err != nil {
-			return nil, err
-		}
-		status := model.ProviderStatus{
-			Name:           name,
-			DisplayName:    displayName(name),
-			Configured:     strings.TrimSpace(blob) != "",
-			Enabled:        true,
-			SupportsSearch: true,
-			SupportsDL:     true,
-		}
-		if name == "assrt" {
-			status.Note = "ASSRT free tier starts at 20 req/min per token+IP"
-		}
-		if name == "opensubtitles" {
-			status.Note = "OpenSubtitles.com API only"
-		}
-		providers = append(providers, status)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return providers, nil
-}
-
-func displayName(name string) string {
-	switch name {
-	case "assrt":
-		return "ASSRT"
-	case "opensubtitles":
-		return "OpenSubtitles.com"
-	default:
-		return strings.ToUpper(name)
-	}
-}
-
-func (r *Repository) SaveProviderCredential(ctx context.Context, name, blob string) error {
-	_, err := r.db.ExecContext(ctx, `
-		UPDATE provider_credentials
-		SET secret_blob = ?, updated_at = ?
-		WHERE name = ?;
-	`, blob, time.Now().UTC().Format(time.RFC3339), name)
-	return err
-}
-
-func (r *Repository) SaveProviderCredentialJSON(ctx context.Context, name string, payload map[string]string) error {
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	return r.SaveProviderCredential(ctx, name, string(raw))
-}
-
-func (r *Repository) GetProviderCredentialBlob(ctx context.Context, name string) (string, error) {
-	var blob string
-	err := r.db.QueryRowContext(ctx, `
-		SELECT secret_blob
-		FROM provider_credentials
-		WHERE name = ?
-		LIMIT 1;
-	`, name).Scan(&blob)
-	if err != nil {
-		return "", err
-	}
-	return blob, nil
-}
-
-func (r *Repository) CreateJob(ctx context.Context, jobType string, details string) (model.Job, error) {
-	now := time.Now().UTC()
-	job := model.Job{
-		ID:        uuid.NewString(),
-		Type:      jobType,
-		Status:    "queued",
-		Details:   details,
-		Retries:   0,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO jobs (id, type, status, details, error, retries, created_at, updated_at)
-		VALUES (?, ?, ?, ?, '', ?, ?, ?);
-	`, job.ID, job.Type, job.Status, job.Details, job.Retries, now.Format(time.RFC3339), now.Format(time.RFC3339))
-	if err != nil {
-		return model.Job{}, err
-	}
-	return job, nil
-}
-
-func (r *Repository) UpdateJobStatus(ctx context.Context, jobID string, status string, errText string) error {
-	return r.UpdateJob(ctx, jobID, status, "", errText)
-}
-
-func (r *Repository) UpdateJob(ctx context.Context, jobID string, status string, details string, errText string) error {
-	_, err := r.db.ExecContext(ctx, `
-		UPDATE jobs
-		SET status = ?, details = CASE WHEN ? = '' THEN details ELSE ? END, error = ?, updated_at = ?
-		WHERE id = ?;
-	`, status, details, details, errText, time.Now().UTC().Format(time.RFC3339), jobID)
-	return err
-}
-
-func (r *Repository) ListJobs(ctx context.Context, limit int) ([]model.Job, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, type, status, details, error, retries, created_at, updated_at
-		FROM jobs
-		ORDER BY created_at DESC
-		LIMIT ?;
-	`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	jobs := make([]model.Job, 0, limit)
-	for rows.Next() {
-		var job model.Job
-		var createdAt string
-		var updatedAt string
-		if err := rows.Scan(
-			&job.ID,
-			&job.Type,
-			&job.Status,
-			&job.Details,
-			&job.Error,
-			&job.Retries,
-			&createdAt,
-			&updatedAt,
-		); err != nil {
-			return nil, err
-		}
-		job.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		job.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
-		jobs = append(jobs, job)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return jobs, nil
-}
-
-func (r *Repository) UpsertMediaItems(ctx context.Context, items []model.MediaItem) (inserted int64, updated int64, err error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	for _, item := range items {
-		existedBefore, checkErr := mediaExistsByPathTx(ctx, tx, item.FilePath)
-		if checkErr != nil {
-			err = checkErr
-			return 0, 0, err
-		}
-
-		hasSubtitle := 0
-		if item.HasSubtitle {
-			hasSubtitle = 1
-		}
-
-		res, execErr := tx.ExecContext(ctx, `
-			INSERT INTO media_items (
-				media_type, title, year, season, episode, file_path, media_hash, has_subtitle, created_at, updated_at
-			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(file_path) DO UPDATE SET
-				media_type = excluded.media_type,
-				title = excluded.title,
-				year = excluded.year,
-				season = excluded.season,
-				episode = excluded.episode,
-				media_hash = excluded.media_hash,
-				has_subtitle = excluded.has_subtitle,
-				updated_at = excluded.updated_at;
-		`,
-			item.MediaType,
-			item.Title,
-			nullableInt(item.Year),
-			nullableInt(item.Season),
-			nullableInt(item.Episode),
-			item.FilePath,
-			item.MediaHash,
-			hasSubtitle,
-			now,
-			now,
-		)
-		if execErr != nil {
-			err = execErr
-			return 0, 0, err
-		}
-		rows, rowsErr := res.RowsAffected()
-		if rowsErr != nil {
-			continue
-		}
-		if existedBefore {
-			updated += rows
-		} else {
-			inserted += rows
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return 0, 0, err
-	}
-	return inserted, updated, nil
-}
-
-func mediaExistsByPathTx(ctx context.Context, tx *sql.Tx, filePath string) (bool, error) {
-	var exists int
-	err := tx.QueryRowContext(ctx, `
-		SELECT 1
-		FROM media_items
-		WHERE file_path = ?
-		LIMIT 1;
-	`, filePath).Scan(&exists)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func (r *Repository) ListMedia(ctx context.Context, missingOnly bool, limit int) ([]model.MediaItem, error) {
-	if limit <= 0 {
-		limit = 200
-	}
-
-	query := `
-		SELECT id, media_type, title, year, season, episode, file_path, media_hash, has_subtitle, created_at, updated_at
-		FROM media_items
-	`
-	args := make([]any, 0, 2)
-	if missingOnly {
-		query += " WHERE has_subtitle = 0 "
-	}
-	query += " ORDER BY updated_at DESC LIMIT ?;"
-	args = append(args, limit)
-
-	rows, err := r.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	items := make([]model.MediaItem, 0, limit)
-	for rows.Next() {
-		var item model.MediaItem
-		var year sql.NullInt64
-		var season sql.NullInt64
-		var episode sql.NullInt64
-		var hasSubtitle int
-		var createdAt string
-		var updatedAt string
-		if err := rows.Scan(
-			&item.ID,
-			&item.MediaType,
-			&item.Title,
-			&year,
-			&season,
-			&episode,
-			&item.FilePath,
-			&item.MediaHash,
-			&hasSubtitle,
-			&createdAt,
-			&updatedAt,
-		); err != nil {
-			return nil, err
-		}
-		item.Year = nullableIntFromDB(year)
-		item.Season = nullableIntFromDB(season)
-		item.Episode = nullableIntFromDB(episode)
-		item.HasSubtitle = hasSubtitle == 1
-		if parsed, err := time.Parse(time.RFC3339, createdAt); err == nil {
-			item.CreatedAt = &parsed
-		}
-		if parsed, err := time.Parse(time.RFC3339, updatedAt); err == nil {
-			item.UpdatedAt = &parsed
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-func (r *Repository) GetMediaByID(ctx context.Context, mediaID int64) (model.MediaItem, error) {
-	var item model.MediaItem
-	var year sql.NullInt64
-	var season sql.NullInt64
-	var episode sql.NullInt64
-	var hasSubtitle int
-	var createdAt string
-	var updatedAt string
-	err := r.db.QueryRowContext(ctx, `
-		SELECT id, media_type, title, year, season, episode, file_path, media_hash, has_subtitle, created_at, updated_at
-		FROM media_items
-		WHERE id = ?
-		LIMIT 1;
-	`, mediaID).Scan(
-		&item.ID,
-		&item.MediaType,
-		&item.Title,
-		&year,
-		&season,
-		&episode,
-		&item.FilePath,
-		&item.MediaHash,
-		&hasSubtitle,
-		&createdAt,
-		&updatedAt,
+		INSERT INTO app_settings (
+			id, media_paths_json, source_language, target_language, bilingual_layout,
+			output_formats_json, translation_provider, translation_model,
+			translation_prompt, max_subtitle_per_batch, updated_at
+		) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			media_paths_json = excluded.media_paths_json,
+			source_language = excluded.source_language,
+			target_language = excluded.target_language,
+			bilingual_layout = excluded.bilingual_layout,
+			output_formats_json = excluded.output_formats_json,
+			translation_provider = excluded.translation_provider,
+			translation_model = excluded.translation_model,
+			translation_prompt = excluded.translation_prompt,
+			max_subtitle_per_batch = excluded.max_subtitle_per_batch,
+			updated_at = excluded.updated_at`,
+		string(mediaPathsJSON),
+		settings.SourceLanguage,
+		settings.TargetLanguage,
+		settings.BilingualLayout,
+		string(outputFormatsJSON),
+		settings.TranslationProvider,
+		settings.TranslationModel,
+		settings.TranslationPrompt,
+		settings.MaxSubtitlePerBatch,
+		settings.UpdatedAt.Format(time.RFC3339),
 	)
-	if err != nil {
-		return model.MediaItem{}, err
-	}
-	item.Year = nullableIntFromDB(year)
-	item.Season = nullableIntFromDB(season)
-	item.Episode = nullableIntFromDB(episode)
-	item.HasSubtitle = hasSubtitle == 1
-	if parsed, parseErr := time.Parse(time.RFC3339, createdAt); parseErr == nil {
-		item.CreatedAt = &parsed
-	}
-	if parsed, parseErr := time.Parse(time.RFC3339, updatedAt); parseErr == nil {
-		item.UpdatedAt = &parsed
-	}
-	return item, nil
+	return err
 }
 
-func (r *Repository) ReplaceSubtitleCandidates(ctx context.Context, mediaID int64, candidates []model.SubtitleCandidate) error {
-	tx, err := r.db.BeginTx(ctx, nil)
+func (r *Repository) ReplaceMediaAssets(ctx context.Context, assets []model.MediaAsset) error {
+	transaction, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if err != nil {
-			_ = tx.Rollback()
+			_ = transaction.Rollback()
 		}
 	}()
 
-	if _, err = tx.ExecContext(ctx, `DELETE FROM subtitle_candidates WHERE media_item_id = ?;`, mediaID); err != nil {
+	if _, err = transaction.ExecContext(ctx, `DELETE FROM media_assets`); err != nil {
 		return err
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
-	for _, candidate := range candidates {
-		if _, err = tx.ExecContext(ctx, `
-			INSERT INTO subtitle_candidates (
-				media_item_id, provider_name, candidate_id, score, language, payload_json, expires_at, created_at,
-				title, release_name, language_text, download_url, details
-			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-		`,
-			mediaID,
-			candidate.ProviderName,
-			candidate.CandidateID,
-			candidate.Score,
-			candidate.Language,
-			candidate.RawPayload,
-			nullableTime(candidate.ExpiresAt),
-			now,
-			candidate.Title,
-			candidate.ReleaseName,
-			candidate.LanguageText,
-			candidate.DownloadURL,
-			candidate.Details,
+	statement, err := transaction.PrepareContext(ctx, `
+		INSERT INTO media_assets (title, root_path, relative_path, file_path, file_size, status, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = statement.Close() }()
+
+	for _, asset := range assets {
+		updatedAt := asset.UpdatedAt
+		if updatedAt.IsZero() {
+			updatedAt = time.Now().UTC()
+		}
+		if _, err = statement.ExecContext(ctx,
+			asset.Title,
+			asset.RootPath,
+			asset.RelativePath,
+			asset.FilePath,
+			asset.FileSize,
+			asset.Status,
+			updatedAt.Format(time.RFC3339),
 		); err != nil {
 			return err
 		}
 	}
 
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	return nil
+	err = transaction.Commit()
+	return err
 }
 
-func (r *Repository) ListSubtitleCandidates(ctx context.Context, mediaID int64, limit int) ([]model.SubtitleCandidate, error) {
+func (r *Repository) ListMediaAssets(ctx context.Context, limit int) ([]model.MediaAsset, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, media_item_id, provider_name, candidate_id, score, language, payload_json, expires_at, created_at,
-		       title, release_name, language_text, download_url, details
-		FROM subtitle_candidates
-		WHERE media_item_id = ?
-		ORDER BY score DESC, created_at DESC
-		LIMIT ?;
-	`, mediaID, limit)
+		SELECT id, title, root_path, relative_path, file_path, file_size, status, updated_at
+		FROM media_assets
+		ORDER BY updated_at DESC, id DESC
+		LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
-	candidates := make([]model.SubtitleCandidate, 0, limit)
+	assets := make([]model.MediaAsset, 0)
 	for rows.Next() {
-		var candidate model.SubtitleCandidate
-		var expiresAt sql.NullString
-		var createdAt string
+		var asset model.MediaAsset
+		var updatedAtRaw string
 		if err := rows.Scan(
-			&candidate.ID,
-			&candidate.MediaItemID,
-			&candidate.ProviderName,
-			&candidate.CandidateID,
-			&candidate.Score,
-			&candidate.Language,
-			&candidate.RawPayload,
-			&expiresAt,
-			&createdAt,
-			&candidate.Title,
-			&candidate.ReleaseName,
-			&candidate.LanguageText,
-			&candidate.DownloadURL,
-			&candidate.Details,
+			&asset.ID,
+			&asset.Title,
+			&asset.RootPath,
+			&asset.RelativePath,
+			&asset.FilePath,
+			&asset.FileSize,
+			&asset.Status,
+			&updatedAtRaw,
 		); err != nil {
 			return nil, err
 		}
-		if expiresAt.Valid && strings.TrimSpace(expiresAt.String) != "" {
-			if parsed, parseErr := time.Parse(time.RFC3339, expiresAt.String); parseErr == nil {
-				candidate.ExpiresAt = &parsed
-			}
-		}
-		if parsed, parseErr := time.Parse(time.RFC3339, createdAt); parseErr == nil {
-			candidate.CreatedAt = &parsed
-		}
-		candidates = append(candidates, candidate)
+		asset.UpdatedAt = parseTime(updatedAtRaw)
+		assets = append(assets, asset)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return candidates, nil
+	return assets, rows.Err()
 }
 
-func (r *Repository) GetSubtitleCandidateByID(ctx context.Context, candidateID int64) (model.SubtitleCandidate, error) {
-	var candidate model.SubtitleCandidate
-	var expiresAt sql.NullString
-	var createdAt string
-	err := r.db.QueryRowContext(ctx, `
-		SELECT id, media_item_id, provider_name, candidate_id, score, language, payload_json, expires_at, created_at,
-		       title, release_name, language_text, download_url, details
-		FROM subtitle_candidates
-		WHERE id = ?
-		LIMIT 1;
-	`, candidateID).Scan(
-		&candidate.ID,
-		&candidate.MediaItemID,
-		&candidate.ProviderName,
-		&candidate.CandidateID,
-		&candidate.Score,
-		&candidate.Language,
-		&candidate.RawPayload,
-		&expiresAt,
-		&createdAt,
-		&candidate.Title,
-		&candidate.ReleaseName,
-		&candidate.LanguageText,
-		&candidate.DownloadURL,
-		&candidate.Details,
+func (r *Repository) CreateJob(ctx context.Context, input CreateJobInput) (model.SubtitleJob, error) {
+	if strings.TrimSpace(input.MediaPath) == "" {
+		return model.SubtitleJob{}, errors.New("媒体路径不能为空")
+	}
+	if strings.TrimSpace(input.FileName) == "" {
+		return model.SubtitleJob{}, errors.New("文件名不能为空")
+	}
+	if len(input.OutputFormats) == 0 {
+		input.OutputFormats = []string{"srt"}
+	}
+	if strings.TrimSpace(input.Provider) == "" {
+		input.Provider = "deepseek"
+	}
+	if strings.TrimSpace(input.SourceLanguage) == "" {
+		input.SourceLanguage = "auto"
+	}
+	if strings.TrimSpace(input.TargetLanguage) == "" {
+		input.TargetLanguage = "zh-CN"
+	}
+
+	outputFormatsJSON, err := json.Marshal(input.OutputFormats)
+	if err != nil {
+		return model.SubtitleJob{}, err
+	}
+
+	now := time.Now().UTC()
+	job := model.SubtitleJob{
+		ID:             fmt.Sprintf("job_%d", now.UnixNano()),
+		MediaAssetID:   input.MediaAssetID,
+		MediaPath:      input.MediaPath,
+		FileName:       input.FileName,
+		Status:         "queued",
+		CurrentStage:   "queued",
+		Progress:       0,
+		SourceLanguage: input.SourceLanguage,
+		TargetLanguage: input.TargetLanguage,
+		Provider:       input.Provider,
+		OutputFormats:  input.OutputFormats,
+		Details:        input.Details,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+
+	_, err = r.db.ExecContext(ctx, `
+		INSERT INTO subtitle_jobs (
+			id, media_asset_id, media_path, file_name, status, current_stage, progress,
+			source_language, target_language, provider, output_formats_json, details,
+			created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID,
+		nullableInt64(job.MediaAssetID),
+		job.MediaPath,
+		job.FileName,
+		job.Status,
+		job.CurrentStage,
+		job.Progress,
+		job.SourceLanguage,
+		job.TargetLanguage,
+		job.Provider,
+		string(outputFormatsJSON),
+		job.Details,
+		job.CreatedAt.Format(time.RFC3339),
+		job.UpdatedAt.Format(time.RFC3339),
 	)
 	if err != nil {
-		return model.SubtitleCandidate{}, err
+		return model.SubtitleJob{}, err
 	}
-	if expiresAt.Valid && strings.TrimSpace(expiresAt.String) != "" {
-		if parsed, parseErr := time.Parse(time.RFC3339, expiresAt.String); parseErr == nil {
-			candidate.ExpiresAt = &parsed
-		}
-	}
-	if parsed, parseErr := time.Parse(time.RFC3339, createdAt); parseErr == nil {
-		candidate.CreatedAt = &parsed
-	}
-	return candidate, nil
+	return job, nil
 }
 
-func (r *Repository) SaveSubtitleFile(ctx context.Context, mediaID int64, language string, providerName string, releaseName string, filePath string, checksum string) error {
-	tx, err := r.db.BeginTx(ctx, nil)
+func (r *Repository) ListJobs(ctx context.Context, limit int) ([]model.SubtitleJob, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, media_asset_id, media_path, file_name, status, current_stage, progress,
+		       source_language, target_language, provider, output_formats_json, details,
+		       created_at, updated_at
+		FROM subtitle_jobs
+		ORDER BY created_at DESC
+		LIMIT ?`, limit)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
+	defer func() { _ = rows.Close() }()
+
+	jobs := make([]model.SubtitleJob, 0)
+	for rows.Next() {
+		var (
+			job               model.SubtitleJob
+			outputFormatsJSON string
+			mediaAssetID      sql.NullInt64
+			createdAtRaw      string
+			updatedAtRaw      string
+		)
+		if err := rows.Scan(
+			&job.ID,
+			&mediaAssetID,
+			&job.MediaPath,
+			&job.FileName,
+			&job.Status,
+			&job.CurrentStage,
+			&job.Progress,
+			&job.SourceLanguage,
+			&job.TargetLanguage,
+			&job.Provider,
+			&outputFormatsJSON,
+			&job.Details,
+			&createdAtRaw,
+			&updatedAtRaw,
+		); err != nil {
+			return nil, err
 		}
-	}()
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err = tx.ExecContext(ctx, `
-		INSERT INTO subtitle_files (media_item_id, language, provider_name, release_name, file_path, checksum, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?);
-	`, mediaID, language, providerName, releaseName, filePath, checksum, now); err != nil {
-		return err
+		if mediaAssetID.Valid {
+			job.MediaAssetID = &mediaAssetID.Int64
+		}
+		if err := json.Unmarshal([]byte(outputFormatsJSON), &job.OutputFormats); err != nil {
+			return nil, err
+		}
+		job.CreatedAt = parseTime(createdAtRaw)
+		job.UpdatedAt = parseTime(updatedAtRaw)
+		jobs = append(jobs, job)
 	}
-
-	if _, err = tx.ExecContext(ctx, `
-		UPDATE media_items
-		SET has_subtitle = 1, updated_at = ?
-		WHERE id = ?;
-	`, now, mediaID); err != nil {
-		return err
-	}
-
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	return nil
+	return jobs, rows.Err()
 }
 
-func nullableInt(value *int) any {
+func (r *Repository) CountMediaAssets(ctx context.Context) (int, error) {
+	return r.countByQuery(ctx, `SELECT COUNT(*) FROM media_assets`)
+}
+
+func (r *Repository) CountPendingJobs(ctx context.Context) (int, error) {
+	return r.countByQuery(ctx, `SELECT COUNT(*) FROM subtitle_jobs WHERE status IN ('queued', 'running')`)
+}
+
+func (r *Repository) countByQuery(ctx context.Context, query string) (int, error) {
+	var count int
+	if err := r.db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func nullableInt64(value *int64) any {
 	if value == nil {
 		return nil
 	}
 	return *value
 }
 
-func nullableIntFromDB(value sql.NullInt64) *int {
-	if !value.Valid {
-		return nil
+func parseTime(raw string) time.Time {
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}
 	}
-	intVal := int(value.Int64)
-	return &intVal
+	return parsed
 }
 
-func nullableTime(value *time.Time) any {
-	if value == nil {
-		return nil
-	}
-	return value.UTC().Format(time.RFC3339)
-}
