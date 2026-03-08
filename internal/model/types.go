@@ -56,13 +56,14 @@ type PipelineStep struct {
 }
 
 type Overview struct {
-	AppName          string         `json:"app_name"`
-	AppSummary       string         `json:"app_summary"`
-	TranslationReady bool           `json:"translation_ready"`
-	AsrReady         bool           `json:"asr_ready"`
-	MediaAssetCount  int            `json:"media_asset_count"`
-	PendingJobCount  int            `json:"pending_job_count"`
-	RecentJobs       []SubtitleJob  `json:"recent_jobs"`
-	Pipeline         []PipelineStep `json:"pipeline"`
-	CurrentSettings  AppSettings    `json:"current_settings"`
+	AppName           string         `json:"app_name"`
+	AppSummary        string         `json:"app_summary"`
+	TranslationReady  bool           `json:"translation_ready"`
+	AsrReady          bool           `json:"asr_ready"`
+	WorkerConcurrency int            `json:"worker_concurrency"`
+	MediaAssetCount   int            `json:"media_asset_count"`
+	PendingJobCount   int            `json:"pending_job_count"`
+	RecentJobs        []SubtitleJob  `json:"recent_jobs"`
+	Pipeline          []PipelineStep `json:"pipeline"`
+	CurrentSettings   AppSettings    `json:"current_settings"`
 }

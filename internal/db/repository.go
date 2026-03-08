@@ -426,7 +426,7 @@ func (r *Repository) ListJobs(ctx context.Context, limit int) ([]model.SubtitleJ
 func (r *Repository) ListPendingJobs(ctx context.Context) ([]model.SubtitleJob, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id FROM subtitle_jobs
-		WHERE status IN ('queued', 'running')
+		WHERE status IN ('queued', 'running', 'cancelling')
 		ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
@@ -472,7 +472,7 @@ func (r *Repository) CountMediaAssets(ctx context.Context) (int, error) {
 }
 
 func (r *Repository) CountPendingJobs(ctx context.Context) (int, error) {
-	return r.countByQuery(ctx, `SELECT COUNT(*) FROM subtitle_jobs WHERE status IN ('queued', 'running')`)
+	return r.countByQuery(ctx, `SELECT COUNT(*) FROM subtitle_jobs WHERE status IN ('queued', 'running', 'cancelling')`)
 }
 
 func (r *Repository) countByQuery(ctx context.Context, query string) (int, error) {

@@ -10,7 +10,8 @@
           <div class="action-row">
             <RouterLink to="/" class="nav-link">返回总览</RouterLink>
             <Button label="刷新" icon="pi pi-refresh" severity="secondary" @click="loadAll" :loading="loading" />
-            <Button v-if="job?.status === 'failed'" label="重试任务" severity="danger" @click="handleRetry" />
+            <Button v-if="canCancel(job?.status)" label="取消任务" severity="contrast" @click="handleCancel" />
+            <Button v-else-if="job?.status === 'failed' || job?.status === 'cancelled'" label="重试任务" severity="danger" @click="handleRetry" />
             <a v-if="job?.output_srt_path" :href="getJobDownloadURL(job.id, 'srt')" class="nav-link">下载 SRT</a>
             <a v-if="job?.output_ass_path" :href="getJobDownloadURL(job.id, 'ass')" class="nav-link">下载 ASS</a>
             <Button v-if="activeOutputPreview.editable && activeOutputPreview.exists" label="保存修改" icon="pi pi-save" @click="handleSave" :loading="saving" />
@@ -21,7 +22,7 @@
         <Message v-if="message" severity="success" :closable="false">{{ message }}</Message>
         <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
 
-        <div class="stat-grid">
+        <div class="stat-grid stat-grid-4">
           <div class="stat-card">
             <div class="label">状态</div>
             <div class="value small">{{ job?.status || '未知' }}</div>
@@ -33,6 +34,10 @@
           <div class="stat-card">
             <div class="label">进度</div>
             <div class="value small">{{ job?.progress ?? 0 }}%</div>
+          </div>
+          <div class="stat-card">
+            <div class="label">输出格式</div>
+            <div class="value small">{{ (job?.output_formats || []).join(' / ') || '未知' }}</div>
           </div>
         </div>
 
@@ -93,7 +98,7 @@ import Button from 'primevue/button'
 import Card from 'primevue/card'
 import Message from 'primevue/message'
 import Tag from 'primevue/tag'
-import { getJob, getJobDownloadURL, getJobPreview, retryJob, saveJobPreview } from '../api'
+import { cancelJob, getJob, getJobDownloadURL, getJobPreview, retryJob, saveJobPreview } from '../api'
 
 const route = useRoute()
 const job = ref(null)
@@ -140,12 +145,28 @@ function switchPreview(kind) {
   syncEditableOutput()
 }
 
+function canCancel(status) {
+  return status === 'queued' || status === 'running' || status === 'cancelling'
+}
+
 async function handleRetry() {
   try {
     errorMessage.value = ''
     message.value = ''
     await retryJob(route.params.id)
     message.value = '任务已重新排队'
+    await loadAll()
+  } catch (error) {
+    errorMessage.value = error.message
+  }
+}
+
+async function handleCancel() {
+  try {
+    errorMessage.value = ''
+    message.value = ''
+    await cancelJob(route.params.id)
+    message.value = '任务取消请求已发送'
     await loadAll()
   } catch (error) {
     errorMessage.value = error.message

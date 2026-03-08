@@ -19,6 +19,7 @@
       - SUBTITLE_OUTPUT_PATH=/app/subtitles
       - MEDIA_PATHS=/media
       - FFMPEG_BIN=ffmpeg
+      - JOB_CONCURRENCY=${JOB_CONCURRENCY:-2}
       - TRANSLATION_PROVIDER=${TRANSLATION_PROVIDER:-deepseek}
       - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}

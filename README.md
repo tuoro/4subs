@@ -20,6 +20,7 @@
 6. 按批次调用 `DeepSeek Chat Completions` 翻译
 7. 生成双语 `SRT` 与 `ASS` 到输出目录
 8. 在任务详情页预览源字幕、双语 `SRT/ASS`，并支持人工校对后保存
+9. 支持并发执行多个任务，并可取消排队中或运行中的任务
 
 ## 当前 API
 
@@ -34,6 +35,7 @@
 - `GET /api/v1/jobs/{id}`
 - `POST /api/v1/jobs`
 - `POST /api/v1/jobs/{id}/retry`
+- `POST /api/v1/jobs/{id}/cancel`
 - `GET /api/v1/jobs/{id}/download?kind=output|srt|ass`
 - `GET /api/v1/jobs/{id}/preview?kind=source|output|srt|ass`
 - `PUT /api/v1/jobs/{id}/preview?kind=srt|ass`
@@ -49,12 +51,22 @@
 - 双语 `SRT` 输出
 - 双语 `ASS` 输出
 - 在线预览与人工校对保存
+- 任务取消
+- 后台并发执行
 
 当前版本暂未支持：
 
 - 图片字幕 `OCR`
 - 多人协作审校
-- 任务取消与并发队列调度
+
+## 任务状态
+
+- `queued`：已进入队列，等待执行
+- `running`：正在处理
+- `cancelling`：已收到取消请求，等待任务中断
+- `cancelled`：任务已取消
+- `completed`：任务已完成
+- `failed`：任务执行失败
 
 ## 新目录职责
 
@@ -83,6 +95,8 @@
 - `DEEPSEEK_MODEL`，默认 `deepseek-chat`
 - `ASR_MODEL`，默认 `whisper-1`
 - `ASR_BASE_URL`，默认 `https://api.openai.com/v1`
+- `JOB_CONCURRENCY`，默认 `2`
+- `MEDIA_PATHS`，本地直接运行时可配置多个媒体目录
 
 ## Docker 启动
 
@@ -132,7 +146,7 @@ ghcr.io/<owner>/<repo>
 
 最值得继续做的功能顺序：
 
-1. 增加任务取消与并发控制
-2. 增加 OCR 字幕提取
-3. 增加术语表和翻译风格模板
-4. 增加字幕版本管理
+1. 增加 OCR 字幕提取
+2. 增加术语表和翻译风格模板
+3. 增加字幕版本管理
+4. 增加任务日志与审计信息

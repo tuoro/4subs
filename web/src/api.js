@@ -68,6 +68,12 @@ export function retryJob(id) {
   })
 }
 
+export function cancelJob(id) {
+  return apiRequest(`/api/v1/jobs/${id}/cancel`, {
+    method: 'POST'
+  })
+}
+
 export function getJobPreview(id, kind = 'output') {
   return apiRequest(`/api/v1/jobs/${id}/preview?kind=${encodeURIComponent(kind)}`)
 }

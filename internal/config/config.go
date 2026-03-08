@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -25,6 +26,7 @@ type Config struct {
 	ASRBaseURL          string
 	ASRAPIKey           string
 	ASRModel            string
+	JobConcurrency      int
 	AppSecret           string
 }
 
@@ -46,12 +48,16 @@ func Load() (Config, error) {
 		ASRBaseURL:          envOrDefault("ASR_BASE_URL", "https://api.openai.com/v1"),
 		ASRAPIKey:           strings.TrimSpace(os.Getenv("ASR_API_KEY")),
 		ASRModel:            envOrDefault("ASR_MODEL", "whisper-1"),
+		JobConcurrency:      intEnvOrDefault("JOB_CONCURRENCY", 2),
 		AppSecret:           strings.TrimSpace(os.Getenv("APP_SECRET")),
 	}
 
 	cfg.DBPath = envOrDefault("DB_PATH", filepath.Join(cfg.DataDir, "4subs.db"))
 	if err := ensureDirs(cfg.DataDir, cfg.WorkDir, cfg.ConfigDir, cfg.SubtitleOutputPath); err != nil {
 		return Config{}, err
+	}
+	if cfg.JobConcurrency <= 0 {
+		cfg.JobConcurrency = 1
 	}
 	return cfg, nil
 }
@@ -86,4 +92,16 @@ func envOrDefault(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func intEnvOrDefault(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }

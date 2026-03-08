@@ -55,16 +55,8 @@ type previewSaveRequest struct {
 }
 
 func New(cfg config.Config, repo *db.Repository) *Server {
-	translatorClient := deepseek.Client{
-		BaseURL: cfg.DeepSeekBaseURL,
-		APIKey:  cfg.DeepSeekAPIKey,
-		Model:   cfg.DeepSeekModel,
-	}
-	asrClient := openaiasr.Client{
-		BaseURL: cfg.ASRBaseURL,
-		APIKey:  cfg.ASRAPIKey,
-		Model:   cfg.ASRModel,
-	}
+	translatorClient := deepseek.Client{BaseURL: cfg.DeepSeekBaseURL, APIKey: cfg.DeepSeekAPIKey, Model: cfg.DeepSeekModel}
+	asrClient := openaiasr.Client{BaseURL: cfg.ASRBaseURL, APIKey: cfg.ASRAPIKey, Model: cfg.ASRModel}
 	runner := jobrunner.New(cfg, repo, translatorClient, asrClient)
 	runner.ResumePending(context.Background())
 	return &Server{cfg: cfg, repo: repo, translator: translatorClient, asr: asrClient, runner: runner}
@@ -90,6 +82,7 @@ func (s *Server) Routes() http.Handler {
 		api.Get("/jobs/{id}", s.handleGetJob)
 		api.Post("/jobs", s.handleCreateJob)
 		api.Post("/jobs/{id}/retry", s.handleRetryJob)
+		api.Post("/jobs/{id}/cancel", s.handleCancelJob)
 		api.Get("/jobs/{id}/download", s.handleDownloadJobResult)
 		api.Get("/jobs/{id}/preview", s.handleGetJobPreview)
 		api.Put("/jobs/{id}/preview", s.handleSaveJobPreview)
@@ -99,7 +92,6 @@ func (s *Server) Routes() http.Handler {
 	if staticDir == "" {
 		return router
 	}
-
 	fileServer := http.FileServer(http.Dir(staticDir))
 	router.Handle("/assets/*", fileServer)
 	router.Get("/*", func(writer http.ResponseWriter, request *http.Request) {
@@ -115,7 +107,6 @@ func (s *Server) Routes() http.Handler {
 		}
 		http.ServeFile(writer, request, filepath.Join(staticDir, "index.html"))
 	})
-
 	return router
 }
 
@@ -125,6 +116,7 @@ func (s *Server) handleHealth(writer http.ResponseWriter, request *http.Request)
 		"timestamp":            time.Now().UTC(),
 		"translation_ready":    s.translator.Ready(),
 		"asr_ready":            s.asr.Ready(),
+		"job_concurrency":      s.cfg.JobConcurrency,
 		"subtitle_output_path": s.cfg.SubtitleOutputPath,
 	})
 }
@@ -152,15 +144,16 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	response := model.Overview{
-		AppName:          "4subs",
-		AppSummary:       "当前版本已支持 SRT/ASS 双格式输出，并在任务详情页进行预览与人工校对。",
-		TranslationReady: s.translator.Ready(),
-		AsrReady:         s.asr.Ready(),
-		MediaAssetCount:  mediaCount,
-		PendingJobCount:  pendingCount,
-		RecentJobs:       recentJobs,
-		Pipeline:         pipeline.DefaultSteps(),
-		CurrentSettings:  settings,
+		AppName:           "4subs",
+		AppSummary:        "当前版本已支持 SRT/ASS 双格式输出、在线校对、并发任务执行和取消运行中任务。",
+		TranslationReady:  s.translator.Ready(),
+		AsrReady:          s.asr.Ready(),
+		WorkerConcurrency: s.cfg.JobConcurrency,
+		MediaAssetCount:   mediaCount,
+		PendingJobCount:   pendingCount,
+		RecentJobs:        recentJobs,
+		Pipeline:          pipeline.DefaultSteps(),
+		CurrentSettings:   settings,
 	}
 	s.writeJSON(writer, http.StatusOK, response)
 }
@@ -177,6 +170,7 @@ func (s *Server) handlePipeline(writer http.ResponseWriter, request *http.Reques
 			"asr_provider":         s.cfg.ASRProvider,
 			"asr_model":            s.cfg.ASRModel,
 			"asr_ready":            s.asr.Ready(),
+			"job_concurrency":      s.cfg.JobConcurrency,
 		},
 	})
 }
@@ -311,12 +305,11 @@ func (s *Server) handleRetryJob(writer http.ResponseWriter, request *http.Reques
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	paths := db.JobOutputPaths{
-		SourcePath:  "",
-		PrimaryPath: "",
-		SRTPath:     "",
-		ASSPath:     "",
+	if job.Status != "failed" && job.Status != "cancelled" {
+		s.writeError(writer, http.StatusBadRequest, fmt.Errorf("只有失败或已取消的任务才能重试"))
+		return
 	}
+	paths := db.JobOutputPaths{}
 	if err := s.repo.UpdateJobProgress(request.Context(), job.ID, "queued", "queued", 0, "任务已重新排队", paths, ""); err != nil {
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
@@ -328,6 +321,24 @@ func (s *Server) handleRetryJob(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	s.writeJSON(writer, http.StatusOK, fresh)
+}
+
+func (s *Server) handleCancelJob(writer http.ResponseWriter, request *http.Request) {
+	jobID := chi.URLParam(request, "id")
+	if err := s.runner.Cancel(jobID); err != nil {
+		if err == sql.ErrNoRows {
+			s.writeError(writer, http.StatusNotFound, fmt.Errorf("任务不存在"))
+			return
+		}
+		s.writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	job, err := s.repo.GetJob(request.Context(), jobID)
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, job)
 }
 
 func (s *Server) handleDownloadJobResult(writer http.ResponseWriter, request *http.Request) {
@@ -437,20 +448,15 @@ func (s *Server) handleSaveJobPreview(writer http.ResponseWriter, request *http.
 	if kind == "srt" {
 		paths.SRTPath = targetPath
 		paths.PrimaryPath = choosePrimaryOutputPath(job.OutputFormats, targetPath, job.OutputASSPath)
-		if paths.PrimaryPath == "" {
-			paths.PrimaryPath = targetPath
-		}
 		job.OutputSRTPath = targetPath
+		job.OutputSubtitlePath = paths.PrimaryPath
 	}
 	if kind == "ass" {
 		paths.ASSPath = targetPath
 		paths.PrimaryPath = choosePrimaryOutputPath(job.OutputFormats, job.OutputSRTPath, targetPath)
-		if paths.PrimaryPath == "" {
-			paths.PrimaryPath = targetPath
-		}
 		job.OutputASSPath = targetPath
+		job.OutputSubtitlePath = paths.PrimaryPath
 	}
-	job.OutputSubtitlePath = paths.PrimaryPath
 	if err := s.repo.UpdateJobProgress(request.Context(), job.ID, job.Status, job.CurrentStage, job.Progress, fmt.Sprintf("%s 字幕已人工保存", strings.ToUpper(kind)), paths, ""); err != nil {
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return

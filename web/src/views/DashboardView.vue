@@ -3,12 +3,12 @@
     <div class="span-12">
       <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
       <Message v-else severity="info" :closable="false">
-        当前版本已支持“源字幕直译 + 找不到字幕时自动走远程 ASR 转写 + 双语 SRT 导出”。
+        当前版本已支持“源字幕直译 + 无字幕回退远程 ASR + SRT/ASS 双格式导出 + 人工校对 + 任务取消与并发执行”。
       </Message>
     </div>
 
     <div class="span-12">
-      <div class="stat-grid">
+      <div class="stat-grid stat-grid-4">
         <div class="stat-card">
           <div class="label">媒体素材数</div>
           <div class="value">{{ overview?.media_asset_count ?? 0 }}</div>
@@ -20,6 +20,10 @@
         <div class="stat-card">
           <div class="label">翻译 / ASR</div>
           <div class="value">{{ statusSummary }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">并发数</div>
+          <div class="value">{{ concurrencySummary }}</div>
         </div>
       </div>
     </div>
@@ -102,8 +106,10 @@
             <template #body="slotProps">
               <div class="action-row">
                 <RouterLink :to="`/jobs/${slotProps.data.id}`" class="nav-link">详情 / 校对</RouterLink>
-                <a v-if="slotProps.data.output_subtitle_path" :href="getJobDownloadURL(slotProps.data.id)" class="nav-link">下载 SRT</a>
-                <Button v-else-if="slotProps.data.status === 'failed'" label="重试" size="small" severity="danger" @click="handleRetry(slotProps.data.id)" />
+                <a v-if="slotProps.data.output_srt_path" :href="getJobDownloadURL(slotProps.data.id, 'srt')" class="nav-link">SRT</a>
+                <a v-if="slotProps.data.output_ass_path" :href="getJobDownloadURL(slotProps.data.id, 'ass')" class="nav-link">ASS</a>
+                <Button v-if="canCancel(slotProps.data.status)" label="取消" size="small" severity="contrast" @click="handleCancel(slotProps.data.id)" />
+                <Button v-else-if="slotProps.data.status === 'failed' || slotProps.data.status === 'cancelled'" label="重试" size="small" severity="danger" @click="handleRetry(slotProps.data.id)" />
               </div>
             </template>
           </Column>
@@ -122,7 +128,7 @@ import Column from 'primevue/column'
 import DataTable from 'primevue/datatable'
 import Message from 'primevue/message'
 import Tag from 'primevue/tag'
-import { createJob, getJobDownloadURL, getOverview, listJobs, listMedia, retryJob, scanMedia } from '../api'
+import { cancelJob, createJob, getJobDownloadURL, getOverview, listJobs, listMedia, retryJob, scanMedia } from '../api'
 
 const overview = ref(null)
 const mediaItems = ref([])
@@ -138,6 +144,14 @@ const statusSummary = computed(() => {
   const translation = overview.value.translation_ready ? '翻译已就绪' : '翻译待配置'
   const asr = overview.value.asr_ready ? 'ASR 已就绪' : 'ASR 待配置'
   return `${translation} / ${asr}`
+})
+
+const concurrencySummary = computed(() => {
+  if (!overview.value) {
+    return '加载中'
+  }
+  const count = Number(overview.value.worker_concurrency || 1)
+  return `${count} 路并发`
 })
 
 async function loadAll() {
@@ -179,7 +193,7 @@ async function handleCreateJob(item) {
       media_asset_id: item.id,
       media_path: item.file_path,
       file_name: item.relative_path,
-      output_formats: ['srt']
+      output_formats: ['srt', 'ass']
     })
     await loadJobsOnly()
   } catch (error) {
@@ -197,23 +211,31 @@ async function handleRetry(jobId) {
   }
 }
 
+async function handleCancel(jobId) {
+  try {
+    errorMessage.value = ''
+    await cancelJob(jobId)
+    await loadJobsOnly()
+  } catch (error) {
+    errorMessage.value = error.message
+  }
+}
+
+function canCancel(status) {
+  return status === 'queued' || status === 'running' || status === 'cancelling'
+}
+
 function statusSeverity(status) {
-  if (status === 'completed') {
-    return 'success'
-  }
-  if (status === 'failed') {
-    return 'danger'
-  }
-  if (status === 'queued') {
-    return 'warn'
-  }
+  if (status === 'completed') return 'success'
+  if (status === 'failed') return 'danger'
+  if (status === 'queued') return 'warn'
+  if (status === 'cancelled') return 'secondary'
+  if (status === 'cancelling') return 'contrast'
   return 'info'
 }
 
 function formatSize(size) {
-  if (!size) {
-    return '0 B'
-  }
+  if (!size) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB']
   let value = size
   let index = 0
@@ -230,8 +252,6 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (timer) {
-    window.clearInterval(timer)
-  }
+  if (timer) window.clearInterval(timer)
 })
 </script>
