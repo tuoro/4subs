@@ -71,6 +71,7 @@ type Overview struct {
 	AppSummary        string         `json:"app_summary"`
 	TranslationReady  bool           `json:"translation_ready"`
 	AsrReady          bool           `json:"asr_ready"`
+	OcrReady          bool           `json:"ocr_ready"`
 	WorkerConcurrency int            `json:"worker_concurrency"`
 	MediaAssetCount   int            `json:"media_asset_count"`
 	PendingJobCount   int            `json:"pending_job_count"`

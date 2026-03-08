@@ -9,47 +9,61 @@ import (
 )
 
 type Config struct {
-	HTTPAddr            string
-	DBPath              string
-	DataDir             string
-	WorkDir             string
-	ConfigDir           string
-	StaticDir           string
-	SubtitleOutputPath  string
-	MediaPaths          []string
-	FFmpegBin           string
-	TranslationProvider string
-	DeepSeekBaseURL     string
-	DeepSeekAPIKey      string
-	DeepSeekModel       string
-	ASRProvider         string
-	ASRBaseURL          string
-	ASRAPIKey           string
-	ASRModel            string
-	JobConcurrency      int
-	AppSecret           string
+	HTTPAddr             string
+	DBPath               string
+	DataDir              string
+	WorkDir              string
+	ConfigDir            string
+	StaticDir            string
+	SubtitleOutputPath   string
+	MediaPaths           []string
+	FFmpegBin            string
+	TranslationProvider  string
+	DeepSeekBaseURL      string
+	DeepSeekAPIKey       string
+	DeepSeekModel        string
+	ASRProvider          string
+	ASRBaseURL           string
+	ASRAPIKey            string
+	ASRModel             string
+	OCRProvider          string
+	OCRBaseURL           string
+	OCRAPIKey            string
+	OCRModel             string
+	OCRFrameIntervalMS   int
+	OCRCropTopPercent    int
+	OCRCropHeightPercent int
+	JobConcurrency       int
+	AppSecret            string
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:            envOrDefault("HTTP_ADDR", ":8080"),
-		DataDir:             envOrDefault("DATA_DIR", "/app/data"),
-		WorkDir:             envOrDefault("WORK_DIR", "/app/work"),
-		ConfigDir:           envOrDefault("CONFIG_DIR", "/app/config"),
-		StaticDir:           envOrDefault("STATIC_DIR", "/app/web/dist"),
-		SubtitleOutputPath:  envOrDefault("SUBTITLE_OUTPUT_PATH", "/app/subtitles"),
-		MediaPaths:          splitComma(envOrDefault("MEDIA_PATHS", "/media")),
-		FFmpegBin:           envOrDefault("FFMPEG_BIN", "ffmpeg"),
-		TranslationProvider: envOrDefault("TRANSLATION_PROVIDER", "deepseek"),
-		DeepSeekBaseURL:     envOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-		DeepSeekAPIKey:      strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
-		DeepSeekModel:       envOrDefault("DEEPSEEK_MODEL", "deepseek-chat"),
-		ASRProvider:         envOrDefault("ASR_PROVIDER", "openai-compatible"),
-		ASRBaseURL:          envOrDefault("ASR_BASE_URL", "https://api.openai.com/v1"),
-		ASRAPIKey:           strings.TrimSpace(os.Getenv("ASR_API_KEY")),
-		ASRModel:            envOrDefault("ASR_MODEL", "whisper-1"),
-		JobConcurrency:      intEnvOrDefault("JOB_CONCURRENCY", 2),
-		AppSecret:           strings.TrimSpace(os.Getenv("APP_SECRET")),
+		HTTPAddr:             envOrDefault("HTTP_ADDR", ":8080"),
+		DataDir:              envOrDefault("DATA_DIR", "/app/data"),
+		WorkDir:              envOrDefault("WORK_DIR", "/app/work"),
+		ConfigDir:            envOrDefault("CONFIG_DIR", "/app/config"),
+		StaticDir:            envOrDefault("STATIC_DIR", "/app/web/dist"),
+		SubtitleOutputPath:   envOrDefault("SUBTITLE_OUTPUT_PATH", "/app/subtitles"),
+		MediaPaths:           splitComma(envOrDefault("MEDIA_PATHS", "/media")),
+		FFmpegBin:            envOrDefault("FFMPEG_BIN", "ffmpeg"),
+		TranslationProvider:  envOrDefault("TRANSLATION_PROVIDER", "deepseek"),
+		DeepSeekBaseURL:      envOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+		DeepSeekAPIKey:       strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
+		DeepSeekModel:        envOrDefault("DEEPSEEK_MODEL", "deepseek-chat"),
+		ASRProvider:          envOrDefault("ASR_PROVIDER", "openai-compatible"),
+		ASRBaseURL:           envOrDefault("ASR_BASE_URL", "https://api.openai.com/v1"),
+		ASRAPIKey:            strings.TrimSpace(os.Getenv("ASR_API_KEY")),
+		ASRModel:             envOrDefault("ASR_MODEL", "whisper-1"),
+		OCRProvider:          envOrDefault("OCR_PROVIDER", "openai-compatible-vision"),
+		OCRBaseURL:           envOrDefault("OCR_BASE_URL", "https://api.openai.com/v1"),
+		OCRAPIKey:            strings.TrimSpace(os.Getenv("OCR_API_KEY")),
+		OCRModel:             envOrDefault("OCR_MODEL", "gpt-4.1-mini"),
+		OCRFrameIntervalMS:   intEnvOrDefault("OCR_FRAME_INTERVAL_MS", 1000),
+		OCRCropTopPercent:    intEnvOrDefault("OCR_CROP_TOP_PERCENT", 72),
+		OCRCropHeightPercent: intEnvOrDefault("OCR_CROP_HEIGHT_PERCENT", 22),
+		JobConcurrency:       intEnvOrDefault("JOB_CONCURRENCY", 2),
+		AppSecret:            strings.TrimSpace(os.Getenv("APP_SECRET")),
 	}
 
 	cfg.DBPath = envOrDefault("DB_PATH", filepath.Join(cfg.DataDir, "4subs.db"))
@@ -58,6 +72,15 @@ func Load() (Config, error) {
 	}
 	if cfg.JobConcurrency <= 0 {
 		cfg.JobConcurrency = 1
+	}
+	if cfg.OCRFrameIntervalMS <= 0 {
+		cfg.OCRFrameIntervalMS = 1000
+	}
+	if cfg.OCRCropTopPercent < 0 || cfg.OCRCropTopPercent >= 100 {
+		cfg.OCRCropTopPercent = 72
+	}
+	if cfg.OCRCropHeightPercent <= 0 || cfg.OCRCropHeightPercent > 100 {
+		cfg.OCRCropHeightPercent = 22
 	}
 	return cfg, nil
 }

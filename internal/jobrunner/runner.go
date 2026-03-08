@@ -15,6 +15,7 @@ import (
 	"github.com/gayhub/4subs/internal/joblog"
 	"github.com/gayhub/4subs/internal/media"
 	"github.com/gayhub/4subs/internal/model"
+	ocrprovider "github.com/gayhub/4subs/internal/ocr"
 	"github.com/gayhub/4subs/internal/subtitle"
 	"github.com/gayhub/4subs/internal/translator/deepseek"
 )
@@ -24,18 +25,20 @@ type Runner struct {
 	repo       *db.Repository
 	translator deepseek.Client
 	asr        openai.Client
+	ocr        ocrprovider.Provider
 	logger     *joblog.Store
 	queue      chan string
 	active     sync.Map
 	cancels    sync.Map
 }
 
-func New(cfg config.Config, repo *db.Repository, translator deepseek.Client, asrClient openai.Client, logger *joblog.Store) *Runner {
+func New(cfg config.Config, repo *db.Repository, translator deepseek.Client, asrClient openai.Client, ocrClient ocrprovider.Provider, logger *joblog.Store) *Runner {
 	runner := &Runner{
 		cfg:        cfg,
 		repo:       repo,
 		translator: translator,
 		asr:        asrClient,
+		ocr:        ocrClient,
 		logger:     logger,
 		queue:      make(chan string, 256),
 	}
@@ -208,10 +211,89 @@ func (r *Runner) resolveSourceBlocks(ctx context.Context, job model.SubtitleJob)
 		}
 		return blocks, path, nil
 	}
-	if !r.asr.Ready() {
-		return nil, "", fmt.Errorf("未找到可用字幕，且 ASR 未配置: %w", err)
+
+	var ocrErr error
+	if r.ocr != nil && r.ocr.Ready() {
+		if progressErr := r.updateProgress(ctx, job.ID, "running", "ocr_extract", 20, "未找到可用文本字幕，正在抽取硬字幕关键帧", db.JobOutputPaths{}, ""); progressErr != nil {
+			return nil, "", progressErr
+		}
+		frames, frameErr := media.ExtractSubtitleFrames(
+			ctx,
+			r.cfg.FFmpegBin,
+			job.MediaPath,
+			r.cfg.WorkDir,
+			time.Duration(r.cfg.OCRFrameIntervalMS)*time.Millisecond,
+			r.cfg.OCRCropTopPercent,
+			r.cfg.OCRCropHeightPercent,
+		)
+		if frameErr != nil {
+			ocrErr = frameErr
+		} else {
+			if progressErr := r.updateProgress(ctx, job.ID, "running", "ocr_recognize", 35, fmt.Sprintf("已抽取 %d 张关键帧，正在调用远程 OCR", len(frames)), db.JobOutputPaths{}, ""); progressErr != nil {
+				return nil, "", progressErr
+			}
+			observations := make([]ocrprovider.Observation, 0, len(frames))
+			var firstRecognizeErr error
+			for _, frame := range frames {
+				if err := ctx.Err(); err != nil {
+					return nil, "", err
+				}
+				text, confidence, recognizeErr := r.ocr.RecognizeImage(ctx, frame.Path)
+				if recognizeErr != nil {
+					if firstRecognizeErr == nil {
+						firstRecognizeErr = recognizeErr
+					}
+					continue
+				}
+				text = strings.TrimSpace(text)
+				if text == "" {
+					continue
+				}
+				observations = append(observations, ocrprovider.Observation{
+					At:         frame.At,
+					Text:       text,
+					Confidence: confidence,
+				})
+			}
+			blocks := ocrprovider.BuildBlocks(observations, ocrprovider.DefaultTimelineOptions())
+			if len(blocks) > 0 {
+				sourceContent := subtitle.RenderSRT(blocks)
+				sourcePath, writeErr := media.WriteOCRSRT(job.MediaPath, r.cfg.WorkDir, sourceContent)
+				if writeErr != nil {
+					return nil, "", writeErr
+				}
+				if progressErr := r.updateProgress(ctx, job.ID, "running", "parse_subtitle", 45, fmt.Sprintf("OCR 识别成功，已恢复 %d 条时间轴字幕", len(blocks)), db.JobOutputPaths{SourcePath: sourcePath}, ""); progressErr != nil {
+					return nil, sourcePath, progressErr
+				}
+				return blocks, sourcePath, nil
+			}
+			if firstRecognizeErr != nil {
+				ocrErr = fmt.Errorf("OCR 未识别出有效字幕，首个错误: %w", firstRecognizeErr)
+			} else {
+				ocrErr = fmt.Errorf("OCR 未识别出有效字幕")
+			}
+		}
 	}
-	if progressErr := r.updateProgress(ctx, job.ID, "running", "extract_audio", 20, "未找到可用字幕，转为提取音频进行 ASR", db.JobOutputPaths{}, ""); progressErr != nil {
+
+	if !r.asr.Ready() {
+		reasons := []string{fmt.Sprintf("文本字幕提取失败: %v", err)}
+		if r.ocr != nil && r.ocr.Ready() {
+			if ocrErr != nil {
+				reasons = append(reasons, fmt.Sprintf("OCR 失败: %v", ocrErr))
+			} else {
+				reasons = append(reasons, "OCR 未产出有效字幕")
+			}
+		} else {
+			reasons = append(reasons, "OCR 未配置")
+		}
+		return nil, "", fmt.Errorf(strings.Join(reasons, "；") + "；且 ASR 未配置")
+	}
+
+	fallbackMessage := "未找到可用文本字幕，转为提取音频进行 ASR"
+	if ocrErr != nil {
+		fallbackMessage = "文本字幕不可用，且 OCR 未产出有效结果，转为提取音频进行 ASR"
+	}
+	if progressErr := r.updateProgress(ctx, job.ID, "running", "extract_audio", 20, fallbackMessage, db.JobOutputPaths{}, ""); progressErr != nil {
 		return nil, "", progressErr
 	}
 	audioPath, audioErr := media.ExtractAudio(ctx, r.cfg.FFmpegBin, job.MediaPath, r.cfg.WorkDir)

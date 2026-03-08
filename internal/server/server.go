@@ -19,6 +19,7 @@ import (
 	"github.com/gayhub/4subs/internal/jobrunner"
 	"github.com/gayhub/4subs/internal/library"
 	"github.com/gayhub/4subs/internal/model"
+	openaivision "github.com/gayhub/4subs/internal/ocr/openai"
 	"github.com/gayhub/4subs/internal/pipeline"
 	"github.com/gayhub/4subs/internal/translator/deepseek"
 	"github.com/go-chi/chi/v5"
@@ -30,6 +31,7 @@ type Server struct {
 	repo       *db.Repository
 	translator deepseek.Client
 	asr        openaiasr.Client
+	ocr        openaivision.Client
 	runner     *jobrunner.Runner
 	logger     *joblog.Store
 }
@@ -59,10 +61,11 @@ type previewSaveRequest struct {
 func New(cfg config.Config, repo *db.Repository) *Server {
 	translatorClient := deepseek.Client{BaseURL: cfg.DeepSeekBaseURL, APIKey: cfg.DeepSeekAPIKey, Model: cfg.DeepSeekModel}
 	asrClient := openaiasr.Client{BaseURL: cfg.ASRBaseURL, APIKey: cfg.ASRAPIKey, Model: cfg.ASRModel}
+	ocrClient := openaivision.Client{BaseURL: cfg.OCRBaseURL, APIKey: cfg.OCRAPIKey, Model: cfg.OCRModel}
 	logger := joblog.New(cfg.WorkDir)
-	runner := jobrunner.New(cfg, repo, translatorClient, asrClient, logger)
+	runner := jobrunner.New(cfg, repo, translatorClient, asrClient, ocrClient, logger)
 	runner.ResumePending(context.Background())
-	return &Server{cfg: cfg, repo: repo, translator: translatorClient, asr: asrClient, runner: runner, logger: logger}
+	return &Server{cfg: cfg, repo: repo, translator: translatorClient, asr: asrClient, ocr: ocrClient, runner: runner, logger: logger}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -120,6 +123,7 @@ func (s *Server) handleHealth(writer http.ResponseWriter, request *http.Request)
 		"timestamp":            time.Now().UTC(),
 		"translation_ready":    s.translator.Ready(),
 		"asr_ready":            s.asr.Ready(),
+		"ocr_ready":            s.ocr.Ready(),
 		"job_concurrency":      s.cfg.JobConcurrency,
 		"subtitle_output_path": s.cfg.SubtitleOutputPath,
 	})
@@ -152,6 +156,7 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 		AppSummary:        "当前版本已支持 SRT/ASS 双格式输出、在线校对、并发任务执行、任务取消与任务日志追踪。",
 		TranslationReady:  s.translator.Ready(),
 		AsrReady:          s.asr.Ready(),
+		OcrReady:          s.ocr.Ready(),
 		WorkerConcurrency: s.cfg.JobConcurrency,
 		MediaAssetCount:   mediaCount,
 		PendingJobCount:   pendingCount,
@@ -174,6 +179,9 @@ func (s *Server) handlePipeline(writer http.ResponseWriter, request *http.Reques
 			"asr_provider":         s.cfg.ASRProvider,
 			"asr_model":            s.cfg.ASRModel,
 			"asr_ready":            s.asr.Ready(),
+			"ocr_provider":         s.cfg.OCRProvider,
+			"ocr_model":            s.cfg.OCRModel,
+			"ocr_ready":            s.ocr.Ready(),
 			"job_concurrency":      s.cfg.JobConcurrency,
 		},
 	})

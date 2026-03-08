@@ -12,14 +12,26 @@ func DefaultSteps() []model.PipelineStep {
 		},
 		{
 			Key:         "extract_subtitle",
-			Title:       "源字幕提取",
-			Description: "优先读取同名外挂字幕，不存在时尝试从视频内嵌文本字幕轨提取。",
+			Title:       "文本字幕提取",
+			Description: "优先读取同名外挂字幕；若存在文本字幕轨，则提取并转成标准 SRT。",
 			Owner:       "ffmpeg",
+		},
+		{
+			Key:         "ocr_extract",
+			Title:       "OCR 抽帧",
+			Description: "当找不到文本字幕时，截取底部字幕区域关键帧，准备交给远程 OCR。",
+			Owner:       "ffmpeg",
+		},
+		{
+			Key:         "ocr_recognize",
+			Title:       "远程 OCR",
+			Description: "调用远程视觉 API 识别硬字幕，并恢复为带时间轴的字幕块。",
+			Owner:       "OCR 适配层",
 		},
 		{
 			Key:         "extract_audio",
 			Title:       "音频提取",
-			Description: "如果没有可用源字幕，则先从视频中提取单声道语音音频。",
+			Description: "如果 OCR 仍不可用或失败，则从视频中提取单声道语音音频。",
 			Owner:       "ffmpeg",
 		},
 		{
@@ -36,8 +48,8 @@ func DefaultSteps() []model.PipelineStep {
 		},
 		{
 			Key:         "render",
-			Title:       "双语 SRT 输出",
-			Description: "合并原文和译文，生成最终双语 SRT 文件并落盘到输出目录。",
+			Title:       "双语字幕输出",
+			Description: "沿用原时间轴合并原文与译文，生成双语 SRT 与 ASS 文件。",
 			Owner:       "字幕渲染模块",
 		},
 	}

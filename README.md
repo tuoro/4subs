@@ -7,6 +7,7 @@
 - 部署：`Docker` 优先
 - 翻译：`DeepSeek API`
 - 转写：`OpenAI 兼容 ASR API`
+- 硬字幕识别：`OpenAI 兼容视觉 OCR API`
 
 ## 当前已实现
 
@@ -15,16 +16,19 @@
 1. 扫描本地媒体目录
 2. 创建字幕翻译任务
 3. 优先提取同名外挂字幕，或抽取视频内嵌文本字幕轨
-4. 如果没有可用字幕，则提取音频并调用远程 ASR 转写
-5. 解析为标准 `SRT` 字幕块
-6. 按批次调用 `DeepSeek Chat Completions` 翻译
-7. 生成双语 `SRT` 与 `ASS` 到输出目录
-8. 在任务详情页预览源字幕、双语 `SRT/ASS`，并支持人工校对后保存
-9. 支持并发执行多个任务，并可取消排队中或运行中的任务
+4. 找不到文本字幕时，优先抽取底部字幕区域关键帧并调用远程 OCR
+5. 如果 OCR 仍未产出有效字幕，则提取音频并调用远程 ASR 转写
+6. 解析为标准 `SRT` 字幕块
+7. 按批次调用 `DeepSeek Chat Completions` 翻译
+8. 生成双语 `SRT` 与 `ASS` 到输出目录
+9. 在任务详情页预览源字幕、双语 `SRT/ASS`，并支持人工校对后保存
+10. 支持并发执行多个任务，并可取消排队中或运行中的任务
+11. 任务详情页支持查看执行日志，便于定位失败阶段和人工修改记录
+12. 设置页支持翻译风格模板、自定义风格要求和术语表
 
 ## 当前 API
 
-- `GET /api/v1/health`
+- `GET /api/v1/health`（包含 `ocr_ready`）
 - `GET /api/v1/overview`
 - `GET /api/v1/pipeline`
 - `GET /api/v1/settings`
@@ -33,10 +37,10 @@
 - `POST /api/v1/media/scan`
 - `GET /api/v1/jobs`
 - `GET /api/v1/jobs/{id}`
+- `GET /api/v1/jobs/{id}/logs`
 - `POST /api/v1/jobs`
 - `POST /api/v1/jobs/{id}/retry`
 - `POST /api/v1/jobs/{id}/cancel`
-- `GET /api/v1/jobs/{id}/logs`
 - `GET /api/v1/jobs/{id}/download?kind=output|srt|ass`
 - `GET /api/v1/jobs/{id}/preview?kind=source|output|srt|ass`
 - `PUT /api/v1/jobs/{id}/preview?kind=srt|ass`
@@ -47,17 +51,20 @@
 
 - 同名外挂字幕提取（`.srt`、`.ass`、`.ssa`、`.vtt`）
 - 视频内嵌文本字幕轨提取
-- 找不到字幕时自动回退到远程 ASR 转写
+- 找不到文本字幕时自动回退到远程 OCR 硬字幕识别
+- OCR 失败时自动回退到远程 ASR 转写
 - DeepSeek 批量翻译
 - 双语 `SRT` 输出
 - 双语 `ASS` 输出
 - 在线预览与人工校对保存
 - 任务取消
 - 后台并发执行
+- 任务日志追踪
+- 术语表与翻译风格模板
 
 当前版本暂未支持：
 
-- 图片字幕 `OCR`
+- OCR 结果缓存与批量复用
 - 多人协作审校
 
 ## 任务状态
@@ -75,7 +82,8 @@
 - `internal/config`：环境变量与目录配置
 - `internal/db`：SQLite 持久化、任务状态与设置存储
 - `internal/library`：本地媒体扫描
-- `internal/media`：字幕源提取、音频提取与结果落盘
+- `internal/media`：字幕源提取、音频提取、OCR 抽帧与结果落盘
+- `internal/ocr`：OCR 时间轴恢复与远程视觉识别适配
 - `internal/subtitle`：SRT/ASS 渲染与字幕解析
 - `internal/jobrunner`：后台任务执行器
 - `internal/translator/deepseek`：DeepSeek 翻译接入
@@ -88,14 +96,23 @@
 至少需要配置：
 
 - `DEEPSEEK_API_KEY`
-- `ASR_API_KEY`
 - `MEDIA_HOST_PATH`
+
+按需配置：
+
+- `ASR_API_KEY`
+- `OCR_API_KEY`
 
 推荐同时确认：
 
 - `DEEPSEEK_MODEL`，默认 `deepseek-chat`
 - `ASR_MODEL`，默认 `whisper-1`
 - `ASR_BASE_URL`，默认 `https://api.openai.com/v1`
+- `OCR_MODEL`，默认 `gpt-4.1-mini`
+- `OCR_BASE_URL`，默认 `https://api.openai.com/v1`
+- `OCR_FRAME_INTERVAL_MS`，默认 `1000`
+- `OCR_CROP_TOP_PERCENT`，默认 `72`
+- `OCR_CROP_HEIGHT_PERCENT`，默认 `22`
 - `JOB_CONCURRENCY`，默认 `2`
 - `MEDIA_PATHS`，本地直接运行时可配置多个媒体目录
 
@@ -134,20 +151,11 @@ docker compose up -d --build
 ghcr.io/<owner>/<repo>
 ```
 
-## 本地验证结果
-
-我已经完成：
-
-- `go build -buildvcs=false ./cmd/server`
-- `npm run build`
-
-说明：当前环境没有 `docker` 命令，所以我没有实际执行本地镜像构建，但 GitHub Actions 工作流已经就位。
-
 ## 下一步建议
 
 最值得继续做的功能顺序：
 
-1. 增加 OCR 字幕提取
-2. 增加术语表和翻译风格模板
-3. 增加字幕版本管理
-4. 增加任务日志与审计信息
+1. OCR 结果缓存与重试策略
+2. 术语表导入 / 导出
+3. 任务日志检索与筛选
+4. 字幕版本管理

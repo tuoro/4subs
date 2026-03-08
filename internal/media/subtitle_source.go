@@ -115,6 +115,11 @@ func WriteSourceSRT(mediaPath string, workDir string, content string) (string, e
 	return WriteTextFile(filepath.Join(workDir, safeName(baseName)+".asr.srt"), content)
 }
 
+func WriteOCRSRT(mediaPath string, workDir string, content string) (string, error) {
+	baseName := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
+	return WriteTextFile(filepath.Join(workDir, safeName(baseName)+".ocr.srt"), content)
+}
+
 func relativeMediaDir(mediaPath string, mediaRoots []string) string {
 	for _, root := range mediaRoots {
 		root = strings.TrimSpace(root)

@@ -26,6 +26,12 @@
       - ASR_PROVIDER=${ASR_PROVIDER:-openai-compatible}
       - ASR_BASE_URL=${ASR_BASE_URL:-https://api.openai.com/v1}
       - ASR_MODEL=${ASR_MODEL:-whisper-1}
+      - OCR_PROVIDER=${OCR_PROVIDER:-openai-compatible-vision}
+      - OCR_BASE_URL=${OCR_BASE_URL:-https://api.openai.com/v1}
+      - OCR_MODEL=${OCR_MODEL:-gpt-4.1-mini}
+      - OCR_FRAME_INTERVAL_MS=${OCR_FRAME_INTERVAL_MS:-1000}
+      - OCR_CROP_TOP_PERCENT=${OCR_CROP_TOP_PERCENT:-72}
+      - OCR_CROP_HEIGHT_PERCENT=${OCR_CROP_HEIGHT_PERCENT:-22}
     volumes:
       - ./deploy/config:/app/config
       - ./deploy/data:/app/data

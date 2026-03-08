@@ -3,7 +3,7 @@
     <div class="span-12">
       <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
       <Message v-else severity="info" :closable="false">
-        当前版本已支持“源字幕直译 + 无字幕回退远程 ASR + SRT/ASS 双格式导出 + 人工校对 + 任务取消与并发执行”。
+        当前版本已支持“文本字幕优先直译 → 找不到字幕时回退远程 OCR → OCR 仍失败再回退远程 ASR”，并输出双语 SRT / ASS，可继续人工校对。
       </Message>
     </div>
 
@@ -18,7 +18,7 @@
           <div class="value">{{ overview?.pending_job_count ?? 0 }}</div>
         </div>
         <div class="stat-card">
-          <div class="label">翻译 / ASR</div>
+          <div class="label">翻译 / OCR / ASR</div>
           <div class="value">{{ statusSummary }}</div>
         </div>
         <div class="stat-card">
@@ -39,7 +39,7 @@
         </div>
       </template>
       <template #content>
-        <p class="card-subtle">现在即使视频没有源字幕，也会自动尝试音频转写；前提是你已经配置可用的 ASR API。</p>
+        <p class="card-subtle">系统会优先提取外挂或内嵌文本字幕；没有文本字幕时先尝试远程 OCR 识别硬字幕，再回退到远程 ASR 音频转写。</p>
         <DataTable :value="mediaItems" stripedRows paginator :rows="6">
           <Column field="title" header="标题" />
           <Column field="relative_path" header="相对路径" />
@@ -57,7 +57,7 @@
             </template>
           </Column>
         </DataTable>
-        <div class="table-note">如果没有配置 ASR，那么没有外挂字幕或内嵌字幕轨的视频仍然会失败。</div>
+        <div class="table-note">如果 OCR 和 ASR 都未配置，那么没有外挂字幕或内嵌字幕轨的视频仍然会失败。</div>
       </template>
     </Card>
 
@@ -142,8 +142,9 @@ const statusSummary = computed(() => {
     return '加载中'
   }
   const translation = overview.value.translation_ready ? '翻译已就绪' : '翻译待配置'
+  const ocr = overview.value.ocr_ready ? 'OCR 已就绪' : 'OCR 待配置'
   const asr = overview.value.asr_ready ? 'ASR 已就绪' : 'ASR 待配置'
-  return `${translation} / ${asr}`
+  return `${translation} / ${ocr} / ${asr}`
 })
 
 const concurrencySummary = computed(() => {
