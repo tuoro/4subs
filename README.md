@@ -141,15 +141,21 @@ docker compose up -d --build
 
 规则：
 
-- 推送到 `main`：构建并推送 `edge`
-- 推送 `v*` 标签：构建并推送版本标签
+- 推送到 `main`：构建并推送 `main`、`edge` 与 `sha-<commit>` 标签
+- 推送 `v*` 标签：构建并推送版本标签、次版本标签与 `sha-<commit>`
 - Pull Request：只构建验证，不推送镜像
+- 支持手动触发 `workflow_dispatch`
 
 镜像地址：
 
 ```text
 ghcr.io/<owner>/<repo>
 ```
+
+默认产物平台：
+
+- `linux/amd64`
+- `linux/arm64`
 
 ## 下一步建议
 
