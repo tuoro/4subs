@@ -135,6 +135,26 @@ docker compose up -d --build
 - UI：`http://localhost:8080`
 - Health：`http://localhost:8080/api/v1/health`
 
+## GHCR 镜像部署
+
+如果你不想在服务器上本地构建，可以直接使用 GitHub Actions 产出的镜像。
+
+1. 复制模板：
+
+```bash
+cp deploy/.env.ghcr.example .env
+```
+
+2. 填写 `.env` 中的 API Key、`MEDIA_HOST_PATH`、`GHCR_IMAGE` 和 `IMAGE_TAG`
+
+3. 直接启动：
+
+```bash
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+更多部署细节见：`docs/deployment.md:1`
+
 ## GitHub Actions 镜像构建
 
 工作流文件：`.github/workflows/docker-image.yml:1`
