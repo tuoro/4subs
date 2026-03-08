@@ -15,6 +15,7 @@ import (
 	openaiasr "github.com/gayhub/4subs/internal/asr/openai"
 	"github.com/gayhub/4subs/internal/config"
 	"github.com/gayhub/4subs/internal/db"
+	"github.com/gayhub/4subs/internal/joblog"
 	"github.com/gayhub/4subs/internal/jobrunner"
 	"github.com/gayhub/4subs/internal/library"
 	"github.com/gayhub/4subs/internal/model"
@@ -30,6 +31,7 @@ type Server struct {
 	translator deepseek.Client
 	asr        openaiasr.Client
 	runner     *jobrunner.Runner
+	logger     *joblog.Store
 }
 
 type createJobRequest struct {
@@ -57,9 +59,10 @@ type previewSaveRequest struct {
 func New(cfg config.Config, repo *db.Repository) *Server {
 	translatorClient := deepseek.Client{BaseURL: cfg.DeepSeekBaseURL, APIKey: cfg.DeepSeekAPIKey, Model: cfg.DeepSeekModel}
 	asrClient := openaiasr.Client{BaseURL: cfg.ASRBaseURL, APIKey: cfg.ASRAPIKey, Model: cfg.ASRModel}
-	runner := jobrunner.New(cfg, repo, translatorClient, asrClient)
+	logger := joblog.New(cfg.WorkDir)
+	runner := jobrunner.New(cfg, repo, translatorClient, asrClient, logger)
 	runner.ResumePending(context.Background())
-	return &Server{cfg: cfg, repo: repo, translator: translatorClient, asr: asrClient, runner: runner}
+	return &Server{cfg: cfg, repo: repo, translator: translatorClient, asr: asrClient, runner: runner, logger: logger}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -80,6 +83,7 @@ func (s *Server) Routes() http.Handler {
 		api.Post("/media/scan", s.handleScanMedia)
 		api.Get("/jobs", s.handleListJobs)
 		api.Get("/jobs/{id}", s.handleGetJob)
+		api.Get("/jobs/{id}/logs", s.handleGetJobLogs)
 		api.Post("/jobs", s.handleCreateJob)
 		api.Post("/jobs/{id}/retry", s.handleRetryJob)
 		api.Post("/jobs/{id}/cancel", s.handleCancelJob)
@@ -145,7 +149,7 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 	}
 	response := model.Overview{
 		AppName:           "4subs",
-		AppSummary:        "当前版本已支持 SRT/ASS 双格式输出、在线校对、并发任务执行和取消运行中任务。",
+		AppSummary:        "当前版本已支持 SRT/ASS 双格式输出、在线校对、并发任务执行、任务取消与任务日志追踪。",
 		TranslationReady:  s.translator.Ready(),
 		AsrReady:          s.asr.Ready(),
 		WorkerConcurrency: s.cfg.JobConcurrency,
@@ -252,6 +256,24 @@ func (s *Server) handleGetJob(writer http.ResponseWriter, request *http.Request)
 	s.writeJSON(writer, http.StatusOK, job)
 }
 
+func (s *Server) handleGetJobLogs(writer http.ResponseWriter, request *http.Request) {
+	jobID := chi.URLParam(request, "id")
+	if _, err := s.repo.GetJob(request.Context(), jobID); err != nil {
+		if err == sql.ErrNoRows {
+			s.writeError(writer, http.StatusNotFound, fmt.Errorf("任务不存在"))
+			return
+		}
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	entries, err := s.logger.List(jobID, parseLimit(request.URL.Query().Get("limit"), 200))
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, map[string]any{"items": entries})
+}
+
 func (s *Server) handleCreateJob(writer http.ResponseWriter, request *http.Request) {
 	var payload createJobRequest
 	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
@@ -284,12 +306,13 @@ func (s *Server) handleCreateJob(writer http.ResponseWriter, request *http.Reque
 		TargetLanguage: firstNonEmpty(payload.TargetLanguage, settings.TargetLanguage),
 		Provider:       settings.TranslationProvider,
 		OutputFormats:  normalizeFormats(payload.OutputFormats, settings.OutputFormats),
-		Details:        firstNonEmpty(payload.Details, "任务已创建，后台会先找字幕，找不到再自动走 ASR。"),
+		Details:        firstNonEmpty(payload.Details, "任务已创建，后台会先找字幕，找不到再自动转为 ASR。"),
 	})
 	if err != nil {
 		s.writeError(writer, http.StatusBadRequest, err)
 		return
 	}
+	_ = s.logger.Append(job.ID, "info", "queued", "任务已创建，等待进入执行队列", "")
 	s.runner.Enqueue(job.ID)
 	s.writeJSON(writer, http.StatusCreated, job)
 }
@@ -314,6 +337,7 @@ func (s *Server) handleRetryJob(writer http.ResponseWriter, request *http.Reques
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
+	_ = s.logger.Append(job.ID, "warn", "queued", "任务已重新排队", "")
 	s.runner.Enqueue(job.ID)
 	fresh, err := s.repo.GetJob(request.Context(), job.ID)
 	if err != nil {
@@ -338,6 +362,7 @@ func (s *Server) handleCancelJob(writer http.ResponseWriter, request *http.Reque
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
+	_ = s.logger.Append(jobID, "warn", job.CurrentStage, "已收到取消请求", "")
 	s.writeJSON(writer, http.StatusOK, job)
 }
 
@@ -461,6 +486,7 @@ func (s *Server) handleSaveJobPreview(writer http.ResponseWriter, request *http.
 		s.writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
+	_ = s.logger.Append(job.ID, "info", "review", fmt.Sprintf("%s 字幕已人工保存", strings.ToUpper(kind)), targetPath)
 	fresh, err := s.readPreview(job, kind)
 	if err != nil {
 		s.writeError(writer, http.StatusInternalServerError, err)

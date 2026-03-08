@@ -55,6 +55,10 @@ export function getJob(id) {
   return apiRequest(`/api/v1/jobs/${id}`)
 }
 
+export function getJobLogs(id, limit = 200) {
+  return apiRequest(`/api/v1/jobs/${id}/logs?limit=${limit}`)
+}
+
 export function createJob(payload) {
   return apiRequest('/api/v1/jobs', {
     method: 'POST',

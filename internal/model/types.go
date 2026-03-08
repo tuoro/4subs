@@ -48,6 +48,14 @@ type SubtitleJob struct {
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
+type JobLogEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Level     string    `json:"level"`
+	Stage     string    `json:"stage"`
+	Message   string    `json:"message"`
+	Detail    string    `json:"detail,omitempty"`
+}
+
 type PipelineStep struct {
 	Key         string `json:"key"`
 	Title       string `json:"title"`

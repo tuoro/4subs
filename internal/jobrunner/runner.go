@@ -12,6 +12,7 @@ import (
 	"github.com/gayhub/4subs/internal/asr/openai"
 	"github.com/gayhub/4subs/internal/config"
 	"github.com/gayhub/4subs/internal/db"
+	"github.com/gayhub/4subs/internal/joblog"
 	"github.com/gayhub/4subs/internal/media"
 	"github.com/gayhub/4subs/internal/model"
 	"github.com/gayhub/4subs/internal/subtitle"
@@ -23,17 +24,19 @@ type Runner struct {
 	repo       *db.Repository
 	translator deepseek.Client
 	asr        openai.Client
+	logger     *joblog.Store
 	queue      chan string
 	active     sync.Map
 	cancels    sync.Map
 }
 
-func New(cfg config.Config, repo *db.Repository, translator deepseek.Client, asrClient openai.Client) *Runner {
+func New(cfg config.Config, repo *db.Repository, translator deepseek.Client, asrClient openai.Client, logger *joblog.Store) *Runner {
 	runner := &Runner{
 		cfg:        cfg,
 		repo:       repo,
 		translator: translator,
 		asr:        asrClient,
+		logger:     logger,
 		queue:      make(chan string, 256),
 	}
 	workerCount := cfg.JobConcurrency
@@ -92,13 +95,15 @@ func (r *Runner) Cancel(jobID string) error {
 	}
 	if cancelFnValue, ok := r.cancels.Load(jobID); ok {
 		if cancelFn, ok := cancelFnValue.(context.CancelFunc); ok {
-			_ = r.repo.UpdateJobProgress(context.Background(), jobID, "cancelling", job.CurrentStage, job.Progress, "任务取消中", paths, "")
+			if err := r.updateProgress(context.Background(), jobID, "cancelling", job.CurrentStage, job.Progress, "任务取消中", paths, ""); err != nil {
+				return err
+			}
 			cancelFn()
 			return nil
 		}
 	}
 	r.active.Delete(jobID)
-	return r.repo.UpdateJobProgress(context.Background(), jobID, "cancelled", "cancelled", job.Progress, "任务已取消", paths, "")
+	return r.markCancelled(jobID, job, paths)
 }
 
 func (r *Runner) worker(index int) {
@@ -142,7 +147,7 @@ func (r *Runner) process(jobID string) error {
 		SRTPath:     job.OutputSRTPath,
 		ASSPath:     job.OutputASSPath,
 	}
-	if err := r.repo.UpdateJobProgress(ctx, jobID, "running", "extract_subtitle", 10, "正在尝试获取源字幕", paths, ""); err != nil {
+	if err := r.updateProgress(ctx, jobID, "running", "extract_subtitle", 10, "正在尝试获取源字幕", paths, ""); err != nil {
 		return err
 	}
 
@@ -152,10 +157,10 @@ func (r *Runner) process(jobID string) error {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			return r.markCancelled(jobID, job, paths)
 		}
-		_ = r.repo.UpdateJobProgress(context.Background(), jobID, "failed", "extract_subtitle", 10, "获取源字幕失败", paths, err.Error())
+		_ = r.updateProgress(context.Background(), jobID, "failed", "extract_subtitle", 10, "获取源字幕失败", paths, err.Error())
 		return err
 	}
-	if err := r.repo.UpdateJobProgress(ctx, jobID, "running", "translate", 55, fmt.Sprintf("开始翻译，共 %d 条字幕", len(blocks)), paths, ""); err != nil {
+	if err := r.updateProgress(ctx, jobID, "running", "translate", 55, fmt.Sprintf("开始翻译，共 %d 条字幕", len(blocks)), paths, ""); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			return r.markCancelled(jobID, job, paths)
 		}
@@ -167,10 +172,10 @@ func (r *Runner) process(jobID string) error {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			return r.markCancelled(jobID, job, paths)
 		}
-		_ = r.repo.UpdateJobProgress(context.Background(), jobID, "failed", "translate", 55, "字幕翻译失败", paths, err.Error())
+		_ = r.updateProgress(context.Background(), jobID, "failed", "translate", 55, "字幕翻译失败", paths, err.Error())
 		return err
 	}
-	if err := r.repo.UpdateJobProgress(ctx, jobID, "running", "render", 85, "翻译完成，正在生成输出字幕", paths, ""); err != nil {
+	if err := r.updateProgress(ctx, jobID, "running", "render", 85, "翻译完成，正在生成输出字幕", paths, ""); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			return r.markCancelled(jobID, job, paths)
 		}
@@ -182,19 +187,19 @@ func (r *Runner) process(jobID string) error {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			return r.markCancelled(jobID, job, paths)
 		}
-		_ = r.repo.UpdateJobProgress(context.Background(), jobID, "failed", "render", 85, "字幕文件生成失败", paths, err.Error())
+		_ = r.updateProgress(context.Background(), jobID, "failed", "render", 85, "字幕文件生成失败", paths, err.Error())
 		return err
 	}
 	paths.PrimaryPath = outputs.PrimaryPath
 	paths.SRTPath = outputs.SRTPath
 	paths.ASSPath = outputs.ASSPath
-	return r.repo.UpdateJobProgress(context.Background(), jobID, "completed", "completed", 100, "字幕输出已生成，可进入详情页校对", paths, "")
+	return r.updateProgress(context.Background(), jobID, "completed", "completed", 100, "字幕输出已生成，可进入详情页校对", paths, "")
 }
 
 func (r *Runner) resolveSourceBlocks(ctx context.Context, job model.SubtitleJob) ([]subtitle.Block, string, error) {
 	path, err := media.ExtractSubtitleSource(ctx, r.cfg.FFmpegBin, job.MediaPath, r.cfg.WorkDir)
 	if err == nil {
-		if parseErr := r.repo.UpdateJobProgress(ctx, job.ID, "running", "parse_subtitle", 30, "已取得源字幕，正在解析 SRT", db.JobOutputPaths{SourcePath: path}, ""); parseErr != nil {
+		if parseErr := r.updateProgress(ctx, job.ID, "running", "parse_subtitle", 30, "已取得源字幕，正在解析 SRT", db.JobOutputPaths{SourcePath: path}, ""); parseErr != nil {
 			return nil, path, parseErr
 		}
 		blocks, parseErr := subtitle.ParseFile(path)
@@ -206,14 +211,14 @@ func (r *Runner) resolveSourceBlocks(ctx context.Context, job model.SubtitleJob)
 	if !r.asr.Ready() {
 		return nil, "", fmt.Errorf("未找到可用字幕，且 ASR 未配置: %w", err)
 	}
-	if progressErr := r.repo.UpdateJobProgress(ctx, job.ID, "running", "extract_audio", 20, "未找到可用字幕，转为提取音频进行 ASR", db.JobOutputPaths{}, ""); progressErr != nil {
+	if progressErr := r.updateProgress(ctx, job.ID, "running", "extract_audio", 20, "未找到可用字幕，转为提取音频进行 ASR", db.JobOutputPaths{}, ""); progressErr != nil {
 		return nil, "", progressErr
 	}
 	audioPath, audioErr := media.ExtractAudio(ctx, r.cfg.FFmpegBin, job.MediaPath, r.cfg.WorkDir)
 	if audioErr != nil {
 		return nil, "", audioErr
 	}
-	if progressErr := r.repo.UpdateJobProgress(ctx, job.ID, "running", "transcribe", 40, "音频提取完成，正在调用 ASR 转写", db.JobOutputPaths{}, ""); progressErr != nil {
+	if progressErr := r.updateProgress(ctx, job.ID, "running", "transcribe", 40, "音频提取完成，正在调用 ASR 转写", db.JobOutputPaths{}, ""); progressErr != nil {
 		return nil, "", progressErr
 	}
 	blocks, transcribeErr := r.asr.Transcribe(ctx, audioPath, job.SourceLanguage)
@@ -275,7 +280,24 @@ func (r *Runner) markCancelled(jobID string, job model.SubtitleJob, paths db.Job
 	if paths.ASSPath == "" {
 		paths.ASSPath = job.OutputASSPath
 	}
-	return r.repo.UpdateJobProgress(context.Background(), jobID, "cancelled", "cancelled", job.Progress, "任务已取消", paths, "")
+	return r.updateProgress(context.Background(), jobID, "cancelled", "cancelled", job.Progress, "任务已取消", paths, "")
+}
+
+func (r *Runner) updateProgress(ctx context.Context, jobID string, status string, stage string, progress int, details string, paths db.JobOutputPaths, errorMessage string) error {
+	if err := r.repo.UpdateJobProgress(ctx, jobID, status, stage, progress, details, paths, errorMessage); err != nil {
+		return err
+	}
+	if r.logger != nil {
+		level := "info"
+		if status == "cancelling" || status == "cancelled" {
+			level = "warn"
+		}
+		if status == "failed" || strings.TrimSpace(errorMessage) != "" {
+			level = "error"
+		}
+		_ = r.logger.Append(jobID, level, stage, details, errorMessage)
+	}
+	return nil
 }
 
 func normalizeFormats(values []string) []string {

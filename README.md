@@ -36,6 +36,7 @@
 - `POST /api/v1/jobs`
 - `POST /api/v1/jobs/{id}/retry`
 - `POST /api/v1/jobs/{id}/cancel`
+- `GET /api/v1/jobs/{id}/logs`
 - `GET /api/v1/jobs/{id}/download?kind=output|srt|ass`
 - `GET /api/v1/jobs/{id}/preview?kind=source|output|srt|ass`
 - `PUT /api/v1/jobs/{id}/preview?kind=srt|ass`

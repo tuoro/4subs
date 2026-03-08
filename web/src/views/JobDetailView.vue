@@ -70,6 +70,29 @@
           </Card>
         </div>
 
+        <Card class="log-card">
+          <template #title>
+            <div class="card-title-row">
+              <h3>任务日志</h3>
+              <Tag :value="`${logs.length} 条`" severity="contrast" />
+            </div>
+          </template>
+          <template #content>
+            <div v-if="logs.length" class="log-list">
+              <div v-for="(entry, index) in logs" :key="`${entry.timestamp}-${index}`" class="log-item">
+                <div class="log-meta">
+                  <span>{{ formatTimestamp(entry.timestamp) }}</span>
+                  <Tag :value="entry.level" :severity="levelSeverity(entry.level)" />
+                  <span>{{ entry.stage || 'system' }}</span>
+                </div>
+                <div class="log-message">{{ entry.message }}</div>
+                <div v-if="entry.detail" class="log-detail">{{ entry.detail }}</div>
+              </div>
+            </div>
+            <p v-else class="card-subtle">当前还没有任务日志，任务开始执行后会在这里看到详细过程。</p>
+          </template>
+        </Card>
+
         <div class="tip-list">
           <div class="tip-item">
             <h3>任务说明</h3>
@@ -98,10 +121,11 @@ import Button from 'primevue/button'
 import Card from 'primevue/card'
 import Message from 'primevue/message'
 import Tag from 'primevue/tag'
-import { cancelJob, getJob, getJobDownloadURL, getJobPreview, retryJob, saveJobPreview } from '../api'
+import { cancelJob, getJob, getJobDownloadURL, getJobLogs, getJobPreview, retryJob, saveJobPreview } from '../api'
 
 const route = useRoute()
 const job = ref(null)
+const logs = ref([])
 const sourcePreview = ref({ exists: false, content: '', path: '', editable: false })
 const srtPreview = ref({ exists: false, content: '', path: '', editable: true })
 const assPreview = ref({ exists: false, content: '', path: '', editable: true })
@@ -121,10 +145,18 @@ async function loadAll() {
     errorMessage.value = ''
     message.value = ''
     const jobId = route.params.id
-    job.value = await getJob(jobId)
-    sourcePreview.value = await getJobPreview(jobId, 'source')
-    srtPreview.value = await getJobPreview(jobId, 'srt')
-    assPreview.value = await getJobPreview(jobId, 'ass')
+    const [jobPayload, sourcePayload, srtPayload, assPayload, logPayload] = await Promise.all([
+      getJob(jobId),
+      getJobPreview(jobId, 'source'),
+      getJobPreview(jobId, 'srt'),
+      getJobPreview(jobId, 'ass'),
+      getJobLogs(jobId)
+    ])
+    job.value = jobPayload
+    sourcePreview.value = sourcePayload
+    srtPreview.value = srtPayload
+    assPreview.value = assPayload
+    logs.value = logPayload.items || []
     if (!srtPreview.value.exists && assPreview.value.exists) {
       activePreviewKind.value = 'ass'
     }
@@ -147,6 +179,19 @@ function switchPreview(kind) {
 
 function canCancel(status) {
   return status === 'queued' || status === 'running' || status === 'cancelling'
+}
+
+function levelSeverity(level) {
+  if (level === 'error') return 'danger'
+  if (level === 'warn') return 'warn'
+  return 'info'
+}
+
+function formatTimestamp(value) {
+  if (!value) return '-'
+  return new Date(value).toLocaleString('zh-CN', {
+    hour12: false
+  })
 }
 
 async function handleRetry() {
@@ -186,6 +231,7 @@ async function handleSave() {
     }
     syncEditableOutput()
     job.value = await getJob(route.params.id)
+    logs.value = (await getJobLogs(route.params.id)).items || []
     message.value = `${activePreviewKind.value.toUpperCase()} 字幕修改已保存`
   } catch (error) {
     errorMessage.value = error.message
@@ -205,3 +251,44 @@ onUnmounted(() => {
   }
 })
 </script>
+
+<style scoped>
+.log-card {
+  margin-top: 1rem;
+}
+
+.log-list {
+  display: grid;
+  gap: 0.75rem;
+  max-height: 18rem;
+  overflow: auto;
+}
+
+.log-item {
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 0.75rem;
+  padding: 0.75rem;
+  background: rgba(15, 23, 42, 0.18);
+}
+
+.log-meta {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  color: #94a3b8;
+  font-size: 0.85rem;
+}
+
+.log-message {
+  margin-top: 0.4rem;
+  font-weight: 600;
+}
+
+.log-detail {
+  margin-top: 0.35rem;
+  color: #cbd5e1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+</style>
