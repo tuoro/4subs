@@ -11,6 +11,9 @@ type AppSettings struct {
 	TranslationProvider string    `json:"translation_provider"`
 	TranslationModel    string    `json:"translation_model"`
 	TranslationPrompt   string    `json:"translation_prompt"`
+	TranslationStyle    string    `json:"translation_style"`
+	CustomStylePrompt   string    `json:"custom_style_prompt"`
+	Glossary            string    `json:"glossary"`
 	MaxSubtitlePerBatch int       `json:"max_subtitle_per_batch"`
 	UpdatedAt           time.Time `json:"updated_at"`
 }

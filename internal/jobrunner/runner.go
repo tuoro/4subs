@@ -167,7 +167,7 @@ func (r *Runner) process(jobID string) error {
 		return err
 	}
 
-	translations, err := r.translator.TranslateBlocks(ctx, settings.TranslationPrompt, job.SourceLanguage, job.TargetLanguage, blocks, settings.MaxSubtitlePerBatch)
+	translations, err := r.translator.TranslateBlocks(ctx, buildTranslationPrompt(settings), job.SourceLanguage, job.TargetLanguage, blocks, settings.MaxSubtitlePerBatch)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			return r.markCancelled(jobID, job, paths)
@@ -298,6 +298,43 @@ func (r *Runner) updateProgress(ctx context.Context, jobID string, status string
 		_ = r.logger.Append(jobID, level, stage, details, errorMessage)
 	}
 	return nil
+}
+
+func buildTranslationPrompt(settings model.AppSettings) string {
+	sections := []string{strings.TrimSpace(settings.TranslationPrompt)}
+	switch strings.TrimSpace(settings.TranslationStyle) {
+	case "faithful":
+		sections = append(sections, "翻译风格：优先忠实原文，不主动扩写，不使用过度意译。")
+	case "concise":
+		sections = append(sections, "翻译风格：尽量简洁，保留核心信息，避免冗长表达。")
+	case "formal":
+		sections = append(sections, "翻译风格：整体正式、克制、书面化，避免过于口语化。")
+	case "natural":
+		sections = append(sections, "翻译风格：自然流畅、符合中文口语习惯，但不要脱离原意。")
+	case "custom":
+		if strings.TrimSpace(settings.CustomStylePrompt) != "" {
+			sections = append(sections, "自定义风格要求："+strings.TrimSpace(settings.CustomStylePrompt))
+		}
+	}
+	glossary := strings.TrimSpace(settings.Glossary)
+	if glossary != "" {
+		sections = append(sections, "术语表要求（若命中请优先遵守）：\n"+glossary)
+	}
+	sections = append(sections,
+		"保持字幕条目一一对应，不要合并或拆分字幕。",
+		"如果原文包含俚语、语气词或场景化表达，请结合上下文给出自然译文。",
+	)
+	result := make([]string, 0, len(sections))
+	for _, section := range sections {
+		trimmed := strings.TrimSpace(section)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	if len(result) == 0 {
+		return "请逐条翻译字幕文本，只输出目标语言译文，不要解释，不要合并或拆分字幕。"
+	}
+	return strings.Join(result, "\n\n")
 }
 
 func normalizeFormats(values []string) []string {

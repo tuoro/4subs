@@ -47,14 +47,35 @@
             <input v-model="form.translation_model" class="field-input" placeholder="deepseek-chat" />
           </div>
 
-          <div class="field-group full">
-            <label class="field-label">翻译提示词</label>
-            <textarea v-model="form.translation_prompt" class="field-textarea" placeholder="请输入翻译提示词"></textarea>
+          <div class="field-group">
+            <label class="field-label">翻译风格</label>
+            <select v-model="form.translation_style" class="field-input">
+              <option value="natural">自然流畅</option>
+              <option value="faithful">忠实直译</option>
+              <option value="concise">简洁压缩</option>
+              <option value="formal">正式书面</option>
+              <option value="custom">自定义风格</option>
+            </select>
           </div>
 
           <div class="field-group">
             <label class="field-label">单批次字幕条数</label>
             <input v-model.number="form.max_subtitle_per_batch" type="number" class="field-input" min="1" />
+          </div>
+
+          <div class="field-group full" v-if="form.translation_style === 'custom'">
+            <label class="field-label">自定义风格要求</label>
+            <textarea v-model="form.custom_style_prompt" class="field-textarea" placeholder="例如：保留轻松俚语感，不要过于书面"></textarea>
+          </div>
+
+          <div class="field-group full">
+            <label class="field-label">术语表</label>
+            <textarea v-model="form.glossary" class="field-textarea" placeholder="每行一个术语规则，例如&#10;top=攻&#10;bottom=受&#10;bear=熊"></textarea>
+          </div>
+
+          <div class="field-group full">
+            <label class="field-label">基础翻译提示词</label>
+            <textarea v-model="form.translation_prompt" class="field-textarea" placeholder="请输入翻译提示词"></textarea>
           </div>
         </div>
       </template>
@@ -76,6 +97,9 @@ const form = reactive({
   translation_provider: 'deepseek',
   translation_model: 'deepseek-chat',
   translation_prompt: '',
+  translation_style: 'natural',
+  custom_style_prompt: '',
+  glossary: '',
   max_subtitle_per_batch: 20
 })
 
@@ -104,6 +128,8 @@ async function handleSave() {
     errorMessage.value = ''
     const payload = {
       ...form,
+      custom_style_prompt: (form.custom_style_prompt || '').trim(),
+      glossary: (form.glossary || '').replace(/\r\n/g, '\n').split('\n').map((item) => item.trim()).filter(Boolean).join('\n'),
       media_paths: mediaPathsText.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
       output_formats: outputFormatsText.value.split(',').map((item) => item.trim()).filter((item) => item === 'srt' || item === 'ass')
     }

@@ -95,7 +95,10 @@ func (r *Repository) EnsureDefaults(ctx context.Context, cfg config.Config) erro
 		OutputFormats:       []string{"srt", "ass"},
 		TranslationProvider: cfg.TranslationProvider,
 		TranslationModel:    cfg.DeepSeekModel,
-		TranslationPrompt:   "请逐条翻译字幕文本，只输出目标语言译文，不要解释，不要合并或拆分字幕。",
+		TranslationPrompt:   defaultTranslationPrompt,
+		TranslationStyle:    "natural",
+		CustomStylePrompt:   "",
+		Glossary:            "",
 		MaxSubtitlePerBatch: 20,
 		UpdatedAt:           time.Now().UTC(),
 	}
@@ -135,6 +138,7 @@ func (r *Repository) GetSettings(ctx context.Context) (model.AppSettings, error)
 		return model.AppSettings{}, err
 	}
 	settings.UpdatedAt = parseTime(updatedAtRaw)
+	decodeTranslationPrompt(&settings)
 	return settings, nil
 }
 
@@ -161,12 +165,21 @@ func (r *Repository) SaveSettings(ctx context.Context, settings model.AppSetting
 		settings.TranslationModel = "deepseek-chat"
 	}
 	if strings.TrimSpace(settings.TranslationPrompt) == "" {
-		settings.TranslationPrompt = "请逐条翻译字幕文本，只输出目标语言译文，不要解释，不要合并或拆分字幕。"
+		settings.TranslationPrompt = defaultTranslationPrompt
 	}
+	if strings.TrimSpace(settings.TranslationStyle) == "" {
+		settings.TranslationStyle = "natural"
+	}
+	settings.CustomStylePrompt = strings.TrimSpace(settings.CustomStylePrompt)
+	settings.Glossary = normalizeGlossary(settings.Glossary)
 	if settings.MaxSubtitlePerBatch <= 0 {
 		settings.MaxSubtitlePerBatch = 20
 	}
 	settings.UpdatedAt = time.Now().UTC()
+	encodedPrompt, err := encodeTranslationPrompt(settings)
+	if err != nil {
+		return err
+	}
 
 	mediaPathsJSON, err := json.Marshal(settings.MediaPaths)
 	if err != nil {
@@ -201,11 +214,71 @@ func (r *Repository) SaveSettings(ctx context.Context, settings model.AppSetting
 		string(outputFormatsJSON),
 		settings.TranslationProvider,
 		settings.TranslationModel,
-		settings.TranslationPrompt,
+		encodedPrompt,
 		settings.MaxSubtitlePerBatch,
 		settings.UpdatedAt.Format(time.RFC3339),
 	)
 	return err
+}
+
+type translationPromptMeta struct {
+	Style             string `json:"style,omitempty"`
+	CustomStylePrompt string `json:"custom_style_prompt,omitempty"`
+	Glossary          string `json:"glossary,omitempty"`
+}
+
+const defaultTranslationPrompt = "???????????????????????????????????"
+
+const translationPromptMetaMarker = "\n\n---4SUBS_META---\n"
+
+func encodeTranslationPrompt(settings model.AppSettings) (string, error) {
+	basePrompt := strings.TrimSpace(settings.TranslationPrompt)
+	if basePrompt == "" {
+		basePrompt = defaultTranslationPrompt
+	}
+	meta := translationPromptMeta{
+		Style:             strings.TrimSpace(settings.TranslationStyle),
+		CustomStylePrompt: strings.TrimSpace(settings.CustomStylePrompt),
+		Glossary:          normalizeGlossary(settings.Glossary),
+	}
+	payload, err := json.Marshal(meta)
+	if err != nil {
+		return "", err
+	}
+	return basePrompt + translationPromptMetaMarker + string(payload), nil
+}
+
+func decodeTranslationPrompt(settings *model.AppSettings) {
+	settings.TranslationPrompt = strings.TrimSpace(settings.TranslationPrompt)
+	settings.TranslationStyle = "natural"
+	settings.CustomStylePrompt = ""
+	settings.Glossary = ""
+	parts := strings.SplitN(settings.TranslationPrompt, translationPromptMetaMarker, 2)
+	settings.TranslationPrompt = strings.TrimSpace(parts[0])
+	if len(parts) < 2 {
+		return
+	}
+	var meta translationPromptMeta
+	if err := json.Unmarshal([]byte(strings.TrimSpace(parts[1])), &meta); err != nil {
+		return
+	}
+	if strings.TrimSpace(meta.Style) != "" {
+		settings.TranslationStyle = strings.TrimSpace(meta.Style)
+	}
+	settings.CustomStylePrompt = strings.TrimSpace(meta.CustomStylePrompt)
+	settings.Glossary = normalizeGlossary(meta.Glossary)
+}
+
+func normalizeGlossary(value string) string {
+	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	result := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return strings.Join(result, "\n")
 }
 
 func (r *Repository) ReplaceMediaAssets(ctx context.Context, assets []model.MediaAsset) error {
